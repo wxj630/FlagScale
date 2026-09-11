@@ -33,6 +33,9 @@ data:
   eval_max_samples: 256
   split_modulo: 20
   shuffle_buffer: 20000
+  # Group rows of similar length so batches pad less (batch-max padding drops
+  # roughly in half for this long-tailed corpus).
+  length_sort_window: 256
   num_negatives: 1
   max_samples: null
 

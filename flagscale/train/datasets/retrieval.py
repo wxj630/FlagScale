@@ -106,6 +106,35 @@ def _buffered_shuffle(stream: Iterator[Any], buffer_size: int, seed: int) -> Ite
     yield from buffer
 
 
+def _text_length(row: dict[str, Any]) -> int:
+    """Proxy for tokenized length, available before tokenization."""
+
+    return len(str(row.get("anchor", ""))) + len(str(row.get("positive", "")))
+
+
+def _length_sorted(stream: Iterator[Any], window: int) -> Iterator[Any]:
+    """Group a stream so that nearby rows have similar text lengths.
+
+    Collators pad every batch to its longest row, so a random batch pays for a
+    length outlier.  Sorting inside a sliding window keeps each batch's rows
+    close in length, which cuts padding dramatically on long-tailed text.  The
+    window is small relative to the shuffle buffer, so global order stays
+    random and the data distribution does not drift across an epoch.
+    """
+
+    window = max(2, int(window))
+    chunk: list[Any] = []
+    for item in stream:
+        chunk.append(item)
+        if len(chunk) >= window:
+            chunk.sort(key=_text_length)
+            yield from chunk
+            chunk = []
+    if chunk:
+        chunk.sort(key=_text_length)
+        yield from chunk
+
+
 class ParquetTripletDataset(IterableDataset[dict[str, str]]):
     """Stream triplets from one parquet file or a directory of shards.
 
@@ -123,6 +152,7 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         shuffle: bool = False,
         shuffle_buffer: int = 0,
         seed: int = 42,
+        length_sort_window: int = 0,
     ) -> None:
         self.path = Path(path)
         self.columns = columns
@@ -132,6 +162,7 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         self.shuffle = shuffle
         self.shuffle_buffer = int(shuffle_buffer or 0)
         self.seed = int(seed)
+        self.length_sort_window = int(length_sort_window or 0)
         self._epoch = 0
 
     def _files(self) -> list[Path]:
@@ -178,11 +209,14 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
 
     def __iter__(self) -> Iterator[dict[str, str]]:
         rank, _ = _shard_context()
-        return _buffered_shuffle(
+        stream = _buffered_shuffle(
             self._iter_rows(),
             self.shuffle_buffer if self.shuffle else 0,
             self.seed + self._epoch * 7919 + rank,
         )
+        if self.length_sort_window > 0:
+            return _length_sorted(stream, self.length_sort_window)
+        return stream
 
 
 class ClipTarDataset(IterableDataset[dict[str, Any]]):
@@ -310,6 +344,9 @@ def build_dataset(
     # Only the training split is shuffled: evaluation batches must stay
     # deterministic and comparable across epochs.
     shuffle = str(split).lower() in {"train", "training"} and shuffle_buffer > 0
+    length_sort_window = int(data_cfg.get("length_sort_window", 0) or 0)
+    if not shuffle:
+        length_sort_window = 0
     if task in {"clip", "vl_embedding"}:
         return ClipTarDataset(
             path,
@@ -332,6 +369,7 @@ def build_dataset(
         shuffle=shuffle,
         shuffle_buffer=shuffle_buffer,
         seed=seed,
+        length_sort_window=length_sort_window,
     )
 
 

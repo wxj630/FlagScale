@@ -25,6 +25,7 @@ data:
   eval_max_samples: 256
   split_modulo: 20
   shuffle_buffer: 20000
+  length_sort_window: 256
   num_negatives: 3
   max_samples: null
 
