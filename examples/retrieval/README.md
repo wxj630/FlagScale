@@ -109,6 +109,27 @@ the configured full stream. T2Ranking's train-only shards are deterministically
 partitioned into train/validation/test rows, while COCO uses train/validation
 rows plus its supplied test shards.
 
+## Retrieval quality evaluation
+
+Loss alone does not show whether an encoder retrieves the right passage. Use
+`evaluate_retrieval.py` to rank each query's positive against its hard
+negatives and report Recall@1/5/10 and MRR:
+
+```bash
+python examples/retrieval/evaluate_retrieval.py \
+  --model-type bge_m3 \
+  --model-path /flagos-search-models/bge-m3/bge-m3 \
+  --task embedding \
+  --data-path /flagos-search-datasets/t2ranking/t2ranking/triplet-15 \
+  --split validation --num-negatives 15 --batch-size 16 --max-samples 512 \
+  --device flagos --output /flagos-search-ckpts/eval/bge_m3_val.json
+```
+
+Pass `--checkpoint <trained-dir>` to evaluate a fine-tuned model instead of the
+base weights. For CLIP and VL embedding the script does symmetric in-batch
+image/text retrieval and reports both directions. The script is single-process
+and does not need torchrun; run it on `cpu` or one accelerator.
+
 ## Output
 
 Each completed run writes a Hugging Face Transformers checkpoint to
