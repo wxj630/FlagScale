@@ -285,6 +285,11 @@ def train_epoch(
 ) -> float:
     model.train()
     optimizer.zero_grad(set_to_none=True)
+    # Reshuffle the streaming dataset each epoch. With DataLoader workers the
+    # dataset is forked when the iterator starts, so this must run first.
+    set_epoch = getattr(loader.dataset, "set_epoch", None)
+    if callable(set_epoch):
+        set_epoch(epoch)
     micro_count = 0
     micro_batches = 0
     total_loss = 0.0

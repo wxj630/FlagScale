@@ -26,6 +26,7 @@ data:
   eval_max_samples: 256
   split_modulo: 20
   shuffle_buffer: 2000
+  num_workers: 6
   max_samples: null
 
 optimizer:

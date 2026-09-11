@@ -33,7 +33,7 @@ from typing import Any
 
 from PIL import Image
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 
 def split_accepts(index: int, split: str, modulo: int = 20) -> bool:
@@ -63,6 +63,22 @@ def _distributed_context() -> tuple[int, int]:
     """Read torchrun's rank variables without requiring an initialized group."""
 
     return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
+
+
+def _shard_context() -> tuple[int, int]:
+    """Combine torchrun rank and DataLoader worker id into one shard.
+
+    An ``IterableDataset`` is materialized independently in every worker, so
+    without worker-aware sharding each of the ``num_workers`` processes would
+    yield the full stream and duplicate samples.  Pairing rank with worker id
+    gives every (rank, worker) a distinct slice of the split.
+    """
+
+    rank, world_size = _distributed_context()
+    info = get_worker_info()
+    if info is None:
+        return rank, world_size
+    return rank * info.num_workers + info.id, world_size * info.num_workers
 
 
 def _buffered_shuffle(stream: Iterator[Any], buffer_size: int, seed: int) -> Iterator[Any]:
@@ -129,7 +145,7 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         except ImportError as exc:  # pragma: no cover - environment error
             raise RuntimeError("pyarrow is required for parquet retrieval data") from exc
 
-        rank, world_size = _distributed_context()
+        rank, world_size = _shard_context()
         seen = 0
         accepted = 0
         yielded = 0
@@ -150,9 +166,18 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
                     if self.max_samples is not None and yielded >= self.max_samples:
                         return
 
+    def set_epoch(self, epoch: int) -> None:
+        """Seed the shuffle stream for a new epoch.
+
+        The training loop calls this on the parent dataset before iterating;
+        DataLoader workers inherit the value when they are forked, so the
+        shuffle order can change every epoch even with multiple workers.
+        """
+
+        self._epoch = int(epoch)
+
     def __iter__(self) -> Iterator[dict[str, str]]:
-        self._epoch += 1
-        rank, _ = _distributed_context()
+        rank, _ = _shard_context()
         return _buffered_shuffle(
             self._iter_rows(),
             self.shuffle_buffer if self.shuffle else 0,
@@ -188,7 +213,7 @@ class ClipTarDataset(IterableDataset[dict[str, Any]]):
         return sorted(self.path.glob("*.tar"))
 
     def _iter_rows(self) -> Iterator[dict[str, Any]]:
-        rank, world_size = _distributed_context()
+        rank, world_size = _shard_context()
         seen = 0
         accepted = 0
         yielded = 0
@@ -222,9 +247,13 @@ class ClipTarDataset(IterableDataset[dict[str, Any]]):
                     if self.max_samples is not None and yielded >= self.max_samples:
                         return
 
+    def set_epoch(self, epoch: int) -> None:
+        """Seed the shuffle stream for a new epoch (see ParquetTripletDataset)."""
+
+        self._epoch = int(epoch)
+
     def __iter__(self) -> Iterator[dict[str, Any]]:
-        self._epoch += 1
-        rank, _ = _distributed_context()
+        rank, _ = _shard_context()
         # Images are large, so the clip/vl configs use a smaller buffer than the
         # text datasets.
         return _buffered_shuffle(
@@ -242,15 +271,27 @@ def retrieval_collate(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
     return {key: [row[key] for row in rows] for key in rows[0]}
 
 
-def make_loader(dataset: IterableDataset, batch_size: int, pin_memory: bool) -> DataLoader:
-    """Create the standard loader for a streaming retrieval dataset."""
+def make_loader(
+    dataset: IterableDataset,
+    batch_size: int,
+    pin_memory: bool,
+    num_workers: int = 0,
+) -> DataLoader:
+    """Create the standard loader for a streaming retrieval dataset.
 
+    Workers only see distinct samples because the datasets shard by
+    ``(rank, worker_id)``; the persistent-worker flag is left off so each
+    epoch re-enters ``__iter__`` and reshuffles.
+    """
+
+    num_workers = max(0, int(num_workers))
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=0,
+        num_workers=num_workers,
         pin_memory=pin_memory,
         collate_fn=retrieval_collate,
+        persistent_workers=False,
     )
 
 
@@ -316,7 +357,16 @@ def build_split_loaders(
         build_dataset(task, data_cfg, validation_path, validation_split, validation_max),
         build_dataset(task, data_cfg, test_path, test_split, test_max),
     )
-    return tuple(make_loader(dataset, batch_size, pin_memory) for dataset in datasets)
+    # Training may parallelize decoding across workers; evaluation stays
+    # single-process so that ``*_max_samples`` counts real samples and results
+    # stay bit-for-bit comparable across runs.
+    train_workers = int(data_cfg.get("num_workers", 0) or 0)
+    loaders = (
+        make_loader(datasets[0], batch_size, pin_memory, train_workers),
+        make_loader(datasets[1], batch_size, pin_memory, 0),
+        make_loader(datasets[2], batch_size, pin_memory, 0),
+    )
+    return loaders
 
 
 __all__ = [
