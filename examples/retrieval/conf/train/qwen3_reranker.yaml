@@ -1,0 +1,35 @@
+name: qwen3-reranker-8b
+task: reranker
+seed: 42
+batch_size: 48
+gradient_accumulation_steps: 2
+epochs: 3
+log_every: 5
+output_dir: /flagos-search-ckpts/${train.name}
+
+model:
+  model_type: qwen3_reranker
+  model_path: /flagos-search-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
+  max_length: 2048
+  torch_dtype: bf16
+  # Train a scalar ranking head while keeping the 8B LM weights frozen.
+  freeze_backbone: true
+  use_score_head: true
+
+data:
+  path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  validation_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  test_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  train_split: train
+  validation_split: validation
+  test_split: test
+  eval_max_samples: 256
+  split_modulo: 20
+  shuffle_buffer: 20000
+  num_negatives: 1
+  max_samples: null
+
+optimizer:
+  lr: 1.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0

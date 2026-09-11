@@ -1,0 +1,67 @@
+# Copyright 2026 FlagOS Contributors
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+
+defaults:
+  - _self_
+  - train: bge_m3
+
+experiment:
+  exp_name: retrieval-${train.name}
+  exp_dir: /flagos-search-ckpts/${train.name}
+  seed: ${train.seed}
+  task:
+    type: train
+    backend: native
+    entrypoint: flagscale/train/train_retrieval.py
+  runner:
+    # The native backend uses torchrun. Override this to 8 for an 8-GPU host.
+    type: ssh
+    hostfile: null
+    nnodes: 1
+    nproc_per_node: 1
+    no_shared_fs: false
+    rdzv_backend: static
+  envs:
+    # Hardware abstraction. Keep `cuda` for the current NVIDIA environment;
+    # vendor environments can override with `train.hardware.device_type=flagos`.
+    FLAGSCALE_DEVICE: ${oc.env:FLAGSCALE_DEVICE,${train.hardware.device_type}}
+    FS_PLATFORM: ${oc.env:FS_PLATFORM,${train.hardware.device_type}}
+    FLAGSCALE_DISTRIBUTED_BACKEND: ${oc.env:FLAGSCALE_DISTRIBUTED_BACKEND,${train.hardware.distributed_backend}}
+    FLAGSCALE_AUTOCAST_DEVICE: ${oc.env:FLAGSCALE_AUTOCAST_DEVICE,${train.hardware.autocast_device}}
+    FLAGOS_USE_FLAGGEMS: ${oc.env:FLAGOS_USE_FLAGGEMS,${train.hardware.use_flaggems}}
+    TOKENIZERS_PARALLELISM: "false"
+    OMP_NUM_THREADS: "1"
+    CUDA_DEVICE_MAX_CONNECTIONS: "1"
+    # W&B reads the API credential from its standard netrc login; no secret is
+    # stored in this repository or in the generated Hydra config.
+    WANDB_MODE: online
+  cmds:
+    # This is overridden to the Torch-FL environment by the CUDA launch script.
+    before_start: >-
+      source ${oc.env:FLAGSCALE_PYTHON_ENV,/flagos-search-codes/torch-fl-cuda/.venv}/bin/activate
+
+action: run
+
+# NativeTrainBackend expects the same lifecycle section as Megatron configs.
+# The retrieval entrypoint uses only checkpoint.save and logging.log_dir, but
+# keeping these fields lets FlagScale create its standard runner directories.
+train:
+  hardware:
+    # `cuda` is the validated path on this host. `flagos` activates torch-fl's
+    # PrivateUse1 device and requires a matching vendor environment.
+    device_type: ${oc.env:FLAGSCALE_DEVICE,cuda}
+    distributed_backend: auto
+    autocast_device: auto
+    use_flaggems: false
+  system:
+    checkpoint:
+      save: ${train.output_dir}
+      load: null
+    logging:
+      log_dir: ${experiment.exp_dir}/logs
+
+hydra:
+  run:
+    dir: ${experiment.exp_dir}/hydra

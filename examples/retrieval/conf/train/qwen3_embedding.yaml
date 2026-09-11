@@ -1,0 +1,36 @@
+name: qwen3-embedding-0.6b
+task: embedding
+seed: 42
+# The 0.6B encoder at max_length 2048 peaks near 80GB at batch 16, so batch 12
+# keeps a safety margin; the accumulation window raises the effective batch to 72.
+batch_size: 8
+gradient_accumulation_steps: 8
+epochs: 3
+log_every: 10
+temperature: 0.05
+output_dir: /flagos-search-ckpts/${train.name}
+
+model:
+  model_type: qwen3_embedding
+  model_path: /flagos-search-models/Qwen3-Embedding-0.6B
+  max_length: 2048
+  torch_dtype: bf16
+  freeze_backbone: false
+
+data:
+  path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  validation_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  test_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  train_split: train
+  validation_split: validation
+  test_split: test
+  eval_max_samples: 256
+  split_modulo: 20
+  shuffle_buffer: 20000
+  num_negatives: 3
+  max_samples: null
+
+optimizer:
+  lr: 2.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0

@@ -1,0 +1,36 @@
+name: qwen3-vl-embedding-8b
+task: vl_embedding
+seed: 42
+batch_size: 64
+gradient_accumulation_steps: 1
+epochs: 3
+log_every: 5
+temperature: 0.05
+output_dir: /flagos-search-ckpts/${train.name}
+
+model:
+  model_type: qwen3_vl_embedding
+  model_path: /flagos-search-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B
+  max_length: 2048
+  torch_dtype: bf16
+  # The 8B vision-language backbone does not fit full AdamW state on one 80GB
+  # card.  Keep it frozen and train the small projection head.
+  freeze_backbone: true
+  projection_dim: 1024
+
+data:
+  path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  validation_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  test_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
+  train_split: train
+  validation_split: validation
+  test_split: all
+  eval_max_samples: 256
+  split_modulo: 20
+  shuffle_buffer: 2000
+  max_samples: null
+
+optimizer:
+  lr: 1.0e-5
+  weight_decay: 0.01
+  max_grad_norm: 1.0
