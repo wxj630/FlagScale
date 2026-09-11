@@ -23,8 +23,8 @@ def get_platform():
     """Get the current platform instance.
 
     Detection priority:
-    1. Environment variable FS_PLATFORM (e.g. "cuda", "npu", "musa")
-    2. Auto-detect: cuda > npu > musa
+    1. Environment variable FS_PLATFORM (e.g. "flagos", "cuda", "npu")
+    2. Auto-detect: flagos > cuda > npu > musa
     """
     global _current_platform
     if _current_platform is not None:
@@ -42,7 +42,7 @@ def get_platform():
         return _current_platform
 
     # 2. Auto-detect in priority order
-    for name in ("cuda", "npu", "musa", "txda"):
+    for name in ("flagos", "cuda", "npu", "musa", "txda"):
         if name in PLATFORMS:
             _current_platform = PLATFORMS[name]
             return _current_platform

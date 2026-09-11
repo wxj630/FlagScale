@@ -44,3 +44,6 @@ class PlatformCUDA(PlatformBase):
 
     def amp_device_type(self) -> str:
         return "cuda"
+
+    def supports_pin_memory(self) -> bool:
+        return True

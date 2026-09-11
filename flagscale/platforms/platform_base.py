@@ -71,6 +71,10 @@ class PlatformBase(ABC):
         """Return the device type string for torch.amp.autocast, e.g. 'cuda', 'npu'."""
         ...
 
+    def supports_pin_memory(self) -> bool:
+        """Whether data loaders may request page-locked host memory."""
+        return False
+
     # ---- Compatibility ----
 
     def supports_distributions_on_device(self) -> bool:

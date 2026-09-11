@@ -6,6 +6,15 @@ PLATFORMS = {}
 def register_platforms() -> None:
     """Register all available platforms."""
 
+    # Torch-FL must be imported by the training entrypoint before this module
+    # is reached.  Its import registers ``torch.flagos`` and the corresponding
+    # distributed backend; this adapter only exposes those APIs to FlagScale.
+    from .platform_flagos import PlatformFlagOS
+
+    platform_flagos = PlatformFlagOS()
+    if platform_flagos.is_available():
+        PLATFORMS["flagos"] = platform_flagos
+
     from .platform_cuda import PlatformCUDA
 
     platform_cuda = PlatformCUDA()
