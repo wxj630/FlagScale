@@ -1,8 +1,13 @@
 name: qwen3-reranker-8b
 task: reranker
 seed: 42
-batch_size: 48
-gradient_accumulation_steps: 2
+# Full-parameter fine-tuning of the 8B reranker.  AdamW state for 8B would need
+# ~64GB on its own and cannot fit an 80GB card, so this config pairs a small
+# micro-batch and gradient checkpointing with the Adafactor optimizer (factored
+# second-moment state, built into torch).  Measured peak is ~35GB at batch 4,
+# and the effective batch is 32.
+batch_size: 4
+gradient_accumulation_steps: 8
 epochs: 3
 log_every: 5
 output_dir: /flagos-search-ckpts/${train.name}
@@ -12,9 +17,10 @@ model:
   model_path: /flagos-search-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
   max_length: 2048
   torch_dtype: bf16
-  # Train a scalar ranking head while keeping the 8B LM weights frozen.
-  freeze_backbone: true
+  # All 8B backbone weights are trainable; the scalar score head is trained too.
+  freeze_backbone: false
   use_score_head: true
+  gradient_checkpointing: true
 
 data:
   path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
@@ -30,6 +36,7 @@ data:
   max_samples: null
 
 optimizer:
+  name: adafactor
   lr: 1.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0

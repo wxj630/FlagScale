@@ -67,5 +67,25 @@ class RetrievalModel(nn.Module, ABC):
         for parameter in self.backbone.parameters():
             parameter.requires_grad_(False)
 
+    def enable_gradient_checkpointing(self) -> bool:
+        """Trade compute for memory by checkpointing backbone activations.
+
+        Full fine-tuning of the 8B adapters does not fit on a single 80GB card
+        once optimizer state is included, so callers enable activation
+        checkpointing to shrink the activation footprint.
+        """
+
+        enable = getattr(self.backbone, "gradient_checkpointing_enable", None)
+        if enable is None:
+            return False
+        try:
+            enable()
+        except (TypeError, ValueError):
+            return False
+        # Cached decoder state is incompatible with checkpointed activations.
+        if hasattr(self.backbone, "config"):
+            self.backbone.config.use_cache = False
+        return True
+
     def load_to_device(self, device: torch.device) -> None:
         self.to(device)

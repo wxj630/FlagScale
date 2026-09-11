@@ -246,6 +246,26 @@ def reduce_metrics(total_loss: float, count: int, device: torch.device) -> float
     return float(values[0].item() / max(values[1].item(), 1.0))
 
 
+def build_optimizer(optim_cfg: DictConfig, parameters: list[nn.Parameter]) -> torch.optim.Optimizer:
+    """Create the configured optimizer for a model's trainable parameters."""
+
+    name = str(optim_cfg.get("name", "adamw")).lower()
+    lr = float(optim_cfg.lr)
+    weight_decay = float(optim_cfg.get("weight_decay", 0.01))
+    if name == "adamw":
+        return torch.optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
+    if name == "adafactor":
+        # Factored second-moment statistics keep 8B full fine-tuning within one
+        # 80GB card: Adafactor state is O(rows+cols) per matrix instead of the
+        # two full fp32 moments AdamW allocates.
+        return torch.optim.Adafactor(
+            parameters,
+            lr=lr,
+            weight_decay=weight_decay,
+        )
+    raise ValueError(f"Unsupported optimizer {name!r}; use 'adamw' or 'adafactor'")
+
+
 def train_epoch(
     model: nn.Module,
     processor: Any,
@@ -373,6 +393,11 @@ def train(config: DictConfig) -> None:
     optim_cfg = train_cfg.optimizer
     model_type = str(model_cfg.get("model_type", train_cfg.name))
     model, processor = build_retrieval_model(model_type, model_cfg, device)
+    if bool(model_cfg.get("gradient_checkpointing", False)):
+        if unwrap_model(model).enable_gradient_checkpointing():
+            log("gradient checkpointing enabled")
+        else:
+            log("gradient checkpointing requested but unsupported by this adapter")
 
     train_loader, validation_loader, test_loader = build_split_loaders(
         task,
@@ -392,11 +417,7 @@ def train(config: DictConfig) -> None:
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable parameters remain; set model.freeze_backbone=false")
-    optimizer = torch.optim.AdamW(
-        trainable,
-        lr=float(optim_cfg.lr),
-        weight_decay=float(optim_cfg.get("weight_decay", 0.01)),
-    )
+    optimizer = build_optimizer(optim_cfg, trainable)
     epochs = int(train_cfg.get("epochs", 3))
     if epochs < 1:
         raise ValueError("train.epochs must be at least 1")

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from omegaconf import DictConfig
 
@@ -84,6 +86,13 @@ class Qwen3RerankerModel(RetrievalModel):
     def save_pretrained(self, output_dir: str) -> None:
         self.backbone.save_pretrained(output_dir)
         self.tokenizer.save_pretrained(output_dir)
+        if self.score_head is not None:
+            # The scalar head is a task head outside the HF checkpoint; persist
+            # it explicitly so a fine-tuned reranker reloads faithfully.
+            torch.save(
+                self.score_head.state_dict(),
+                str(Path(output_dir) / "score_head.pt"),
+            )
 
     @classmethod
     def from_pretrained(
@@ -107,6 +116,10 @@ class Qwen3RerankerModel(RetrievalModel):
             int(model_cfg.get("false_token_id", 2152)),
             bool(model_cfg.get("use_score_head", False)),
         )
+        head_path = Path(str(model_cfg.model_path)) / "score_head.pt"
+        if model.score_head is not None and head_path.is_file():
+            state = torch.load(str(head_path), map_location="cpu")
+            model.score_head.load_state_dict(state)
         model.load_to_device(device)
         if bool(model_cfg.get("freeze_backbone", False)):
             model.freeze_backbone()
