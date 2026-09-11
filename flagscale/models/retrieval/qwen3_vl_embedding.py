@@ -136,4 +136,9 @@ class Qwen3VLEmbeddingModel(RetrievalModel):
         model.load_to_device(device)
         if bool(model_cfg.get("freeze_backbone", False)):
             model.freeze_backbone()
+        elif bool(model_cfg.get("freeze_vision", False)):
+            # Keep the pretrained vision tower fixed and fine-tune the language
+            # tower plus the projection, which is the usual single-card setup
+            # for a large vision-language encoder.
+            model.freeze_vision()
         return model

@@ -82,10 +82,30 @@ class RetrievalModel(nn.Module, ABC):
             enable()
         except (TypeError, ValueError):
             return False
-        # Cached decoder state is incompatible with checkpointed activations.
-        if hasattr(self.backbone, "config"):
-            self.backbone.config.use_cache = False
+        self.disable_cache()
         return True
+
+    def disable_cache(self) -> None:
+        """Turn off cached decoder state, which checkpointing cannot use."""
+
+        configs = [getattr(self.backbone, "config", None)]
+        config = configs[0]
+        # Vision-language configs keep the decoder settings in a nested
+        # ``text_config``; both levels may carry a use_cache flag.
+        if config is not None and getattr(config, "text_config", None) is not None:
+            configs.append(config.text_config)
+        for config in configs:
+            if config is not None and hasattr(config, "use_cache"):
+                config.use_cache = False
+
+    def freeze_vision(self) -> None:
+        """Freeze a vision tower when the adapter has one."""
+
+        vision = getattr(self.backbone, "visual", None)
+        if vision is None:
+            return
+        for parameter in vision.parameters():
+            parameter.requires_grad_(False)
 
     def load_to_device(self, device: torch.device) -> None:
         self.to(device)

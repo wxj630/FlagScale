@@ -1,8 +1,15 @@
 name: qwen3-vl-embedding-8b
 task: vl_embedding
 seed: 42
-batch_size: 64
-gradient_accumulation_steps: 1
+# Single-card full-parameter training of the 8B VL encoder.  AdamW state for 8B
+# cannot fit an 80GB card, so this config uses gradient checkpointing, the
+# Adafactor optimizer (factored second-moment state) and a small micro-batch,
+# with gradient accumulation restoring an effective batch of 32.  The
+# pretrained vision tower stays frozen (set freeze_vision: false to train it
+# too when more memory is available); the 8B language tower and the projection
+# are trained.
+batch_size: 8
+gradient_accumulation_steps: 4
 epochs: 3
 log_every: 5
 temperature: 0.05
@@ -13,9 +20,9 @@ model:
   model_path: /flagos-search-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B
   max_length: 2048
   torch_dtype: bf16
-  # The 8B vision-language backbone does not fit full AdamW state on one 80GB
-  # card.  Keep it frozen and train the small projection head.
-  freeze_backbone: true
+  freeze_backbone: false
+  freeze_vision: true
+  gradient_checkpointing: true
   projection_dim: 1024
 
 data:
@@ -32,6 +39,7 @@ data:
   max_samples: null
 
 optimizer:
+  name: adafactor
   lr: 1.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0
