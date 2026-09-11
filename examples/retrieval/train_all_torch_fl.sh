@@ -17,13 +17,17 @@ export FLAGOS_USE_FLAGGEMS="${FLAGOS_USE_FLAGGEMS:-false}"
 # fine-tunes that run close to the 80GB card's capacity.
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 
-models=(
-  bge_m3
-  qwen3_embedding
-  qwen3_vl_embedding
-  qwen3_reranker
-  clip_vit_large
-)
+if [[ -n "${MODELS:-}" ]]; then
+  read -r -a models <<< "${MODELS}"
+else
+  models=(
+    bge_m3
+    qwen3_embedding
+    qwen3_vl_embedding
+    qwen3_reranker
+    clip_vit_large
+  )
+fi
 
 failed=()
 for model in "${models[@]}"; do
