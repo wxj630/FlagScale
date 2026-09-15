@@ -18,9 +18,13 @@ model:
   model_path: /flagos-search-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
   max_length: 640
   torch_dtype: bf16
-  # All 8B backbone weights are trainable; the scalar score head is trained too.
+  # Fine-tune all 8B weights using the checkpoint's own yes/no scoring
+  # (log P(yes) - log P(no) at the final position).  A randomly initialised
+  # scalar head discards the pretrained reranking ability: with the head the
+  # loss sat above the ln2 random baseline, while the native logit scoring
+  # starts around 0.43 BCE (acc ~0.81) on the same pairs.
   freeze_backbone: false
-  use_score_head: true
+  use_score_head: false
   gradient_checkpointing: true
 
 data:

@@ -25,6 +25,19 @@ from .base import RetrievalModel
 from .transformer_encoder import torch_dtype_from_config
 from .registry import register_retrieval_model
 
+# The checkpoint is trained to answer yes/no through Qwen's chat format; its
+# published usage builds that framing from an explicit prefix/suffix pair and
+# scores the final position.  Scoring with a generic "Query:/Passage:" prompt
+# does not reproduce the pretrained behaviour, so the canonical framing is kept
+# here and only the instruction is configurable.
+DEFAULT_INSTRUCTION = (
+    "Given a web search query, retrieve relevant passages that answer the query"
+)
+RERANK_SYSTEM = (
+    "Judge whether the Document meets the requirements based on the Query and "
+    'the Instruct provided. Note that the answer can only be "yes" or "no".'
+)
+
 
 @register_retrieval_model("qwen3_reranker")
 class Qwen3RerankerModel(RetrievalModel):
@@ -38,6 +51,7 @@ class Qwen3RerankerModel(RetrievalModel):
         true_token_id: int,
         false_token_id: int,
         use_score_head: bool = False,
+        instruction: str = DEFAULT_INSTRUCTION,
     ):
         super().__init__(backbone)
         self.tokenizer = tokenizer
@@ -45,22 +59,38 @@ class Qwen3RerankerModel(RetrievalModel):
         self.true_token_id = true_token_id
         self.false_token_id = false_token_id
         self.use_score_head = use_score_head
+        self.instruction = instruction
         hidden_size = int(backbone.config.hidden_size)
         dtype = next(backbone.parameters()).dtype
         self.score_head = (
             torch.nn.Linear(hidden_size, 1, dtype=dtype) if use_score_head else None
         )
+        self._prefix_ids = self.tokenizer(
+            "<|im_start|>system\n" + RERANK_SYSTEM + "<|im_end|>\n<|im_start|>user\n",
+            add_special_tokens=False,
+        )["input_ids"]
+        self._suffix_ids = self.tokenizer(
+            "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+            add_special_tokens=False,
+        )["input_ids"]
 
     def prepare_reranker_inputs(self, pairs):
-        prompt = "Given a web search query, retrieve relevant passages that answer the query\n"
-        texts = [prompt + "Query: " + query + "\nPassage: " + document for query, document in pairs]
-        return self.tokenizer(
-            texts,
-            padding=True,
-            truncation=True,
-            max_length=self.max_length,
-            return_tensors="pt",
-        )
+        bodies = [
+            "<Instruct>: {i}\n<Query>: {q}\n<Document>: {d}".format(
+                i=self.instruction, q=query, d=document
+            )
+            for query, document in pairs
+        ]
+        budget = max(16, self.max_length - len(self._prefix_ids) - len(self._suffix_ids))
+        encoded = self.tokenizer(
+            bodies,
+            padding=False,
+            truncation="longest_first",
+            return_attention_mask=False,
+            max_length=budget,
+        )["input_ids"]
+        ids = [self._prefix_ids + row + self._suffix_ids for row in encoded]
+        return self.tokenizer.pad({"input_ids": ids}, padding=True, return_tensors="pt")
 
     def prepare_embedding_inputs(self, inputs):
         raise TypeError("Qwen3-Reranker only supports query/document pairs")
@@ -115,6 +145,7 @@ class Qwen3RerankerModel(RetrievalModel):
             int(model_cfg.get("true_token_id", 9693)),
             int(model_cfg.get("false_token_id", 2152)),
             bool(model_cfg.get("use_score_head", False)),
+            str(model_cfg.get("instruction", DEFAULT_INSTRUCTION)),
         )
         head_path = Path(str(model_cfg.model_path)) / "score_head.pt"
         if model.score_head is not None and head_path.is_file():
@@ -123,4 +154,6 @@ class Qwen3RerankerModel(RetrievalModel):
         model.load_to_device(device)
         if bool(model_cfg.get("freeze_backbone", False)):
             model.freeze_backbone()
+        if bool(model_cfg.get("gradient_checkpointing", False)):
+            model.enable_gradient_checkpointing()
         return model
