@@ -46,6 +46,37 @@ for model in "${models[@]}"; do
     train.output_dir="${RUN_ROOT}/${model}" \
     experiment.exp_dir="${RUN_ROOT}/${model}/hydra"; then
     echo "===== ${model} OK ====="
+    # Evaluate immediately: the device is free between models, and a rank-based
+    # quality metric is the only way to tell whether training actually helped.
+    # Doing it here avoids competing with the next model for the accelerator.
+    if [[ "${EVAL_AFTER_TRAIN:-1}" == "1" ]]; then
+      CONF="examples/retrieval/conf/train/${model}.yaml"
+      SPLIT="${EVAL_SPLIT:-validation}"
+      mkdir -p "${RUN_ROOT}/eval"
+      value() { "$PYTHON" examples/retrieval/conf_value.py "$CONF" "$1"; }
+      if [[ "$SPLIT" == "test" ]]; then
+        DATA="$(value 'data.test_path' || true)"
+        [[ -n "$DATA" ]] || DATA="$(value data.path)"
+      else
+        DATA="$(value 'data.validation_path' || true)"
+        [[ -n "$DATA" ]] || DATA="$(value data.path)"
+      fi
+      echo "===== evaluating ${model} on ${SPLIT} (device) ====="
+      "$PYTHON" examples/retrieval/evaluate_retrieval.py \
+        --model-type "${model}" \
+        --model-path "$(value model.model_path)" \
+        --checkpoint "${RUN_ROOT}/${model}" \
+        --task "$(value task)" \
+        --data-path "$DATA" \
+        --split "$SPLIT" \
+        --num-negatives "$(value 'data.num_negatives' || echo 1)" \
+        --batch-size "${EVAL_BATCH_SIZE:-16}" \
+        --max-samples "${EVAL_MAX_SAMPLES:-1000}" \
+        --max-length "$(value 'model.max_length')" \
+        --device flagos \
+        --output "${RUN_ROOT}/eval/${model}_${SPLIT}_retrieval.json" \
+        || echo "===== eval for ${model} failed (training result is still kept) ====="
+    fi
   else
     echo "===== ${model} FAILED (continuing with the remaining models) ====="
     failed+=("${model}")

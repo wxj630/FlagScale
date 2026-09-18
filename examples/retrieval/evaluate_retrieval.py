@@ -19,10 +19,27 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
-# torch-fl must claim the PrivateUse1 slot before the first flagos tensor.
-if os.environ.get("FLAGSCALE_DEVICE", "").strip().lower() in {"flagos", "privateuseone"}:
+# torch-fl must claim the PrivateUse1 slot before the first flagos tensor is
+# created.  Check both the environment and the requested device so that
+# ``--device flagos`` works on its own, without relying on the caller to export
+# FLAGSCALE_DEVICE.
+_ENV_DEVICE = os.environ.get("FLAGSCALE_DEVICE", "").strip().lower()
+_CLI_DEVICE = next(
+    (
+        arg.split("=", 1)[1]
+        for arg in sys.argv[1:]
+        if arg.startswith("--device=")
+    ),
+    None,
+)
+if _CLI_DEVICE is None and "--device" in sys.argv:
+    index = sys.argv.index("--device")
+    _CLI_DEVICE = sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+_CLI_DEVICE = (_CLI_DEVICE or "").strip().lower()
+if _ENV_DEVICE in {"flagos", "privateuseone"} or _CLI_DEVICE.startswith("flagos"):
     import torch_fl  # noqa: F401
 
 import torch
@@ -173,7 +190,9 @@ def main() -> None:
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
     if args.output:
-        Path(args.output).write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 if __name__ == "__main__":
