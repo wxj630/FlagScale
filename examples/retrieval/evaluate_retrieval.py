@@ -43,11 +43,12 @@ if _ENV_DEVICE in {"flagos", "privateuseone"} or _CLI_DEVICE.startswith("flagos"
     import torch_fl  # noqa: F401
 
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 from flagscale.models.retrieval import build_retrieval_model
 from flagscale.train.datasets.retrieval import build_dataset
-from flagscale.train.losses.retrieval import embedding_batch, reranker_batch
+from flagscale.train.losses.retrieval import embedding_batch, move_features, reranker_batch
 
 
 def rank_metrics(ranks: list[int], ks: tuple[int, ...] = (1, 5, 10)) -> dict[str, float]:
@@ -72,7 +73,8 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
     """Rank each query's positive against its hard negatives."""
 
     ranks: list[int] = []
-    for chunk in _batched(rows, batch_size):
+    total = len(rows)
+    for index, chunk in enumerate(_batched(rows, batch_size)):
         anchors = [row["anchor"] for row in chunk]
         if task == "reranker":
             pair_lists: list[list[str]] = []
@@ -97,25 +99,70 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
             scores = torch.einsum("bd,bkd->bk", anchor_emb, candidates)
             positive = scores[:, :1]
             ranks.extend((1 + (scores > positive).sum(dim=1)).tolist())
+        # Full test splits take hours on the 8B models, so report progress
+        # instead of leaving the caller blind until the final JSON.
+        if (index + 1) % 50 == 0:
+            done = len(ranks)
+            print(
+                f"  [progress] {done}/{total} queries "
+                f"({done / total * 100:.1f}%) running_mrr={_mrr(ranks):.4f}",
+                flush=True,
+            )
     return ranks
 
 
+def _mrr(ranks: list[int]) -> float:
+    return sum(1.0 / rank for rank in ranks) / len(ranks) if ranks else 0.0
+
+
 @torch.no_grad()
-def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tuple[int, ...]):
+def _clip_embeddings(model, chunk: list[dict], device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Text and image features for a CLIP batch.
+
+    CLIP's own forward needs text and images together, so it cannot go through
+    the generic ``prepare_embedding_inputs`` path; Transformers exposes separate
+    feature extractors which is exactly what retrieval ranking needs.
+    """
+
+    base = model.module if hasattr(model, "module") else model
+    processor = base.processor
+    backbone = base.backbone
+    texts = [row["text"] for row in chunk]
+    images = [row["image"] for row in chunk]
+    text_inputs = move_features(processor(text=texts, return_tensors="pt", padding=True, truncation=True), device)
+    image_inputs = move_features(processor(images=images, return_tensors="pt"), device)
+    text_emb = F.normalize(backbone.get_text_features(**text_inputs).float(), p=2, dim=-1)
+    image_emb = F.normalize(backbone.get_image_features(**image_inputs).float(), p=2, dim=-1)
+    return text_emb, image_emb
+
+
+@torch.no_grad()
+def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tuple[int, ...], task: str = ""):
     """Symmetric in-batch image/text retrieval (CLIP / VL embedding)."""
 
     text_ranks: list[int] = []
     image_ranks: list[int] = []
-    for chunk in _batched(rows, batch_size):
-        text_inputs = [{"text": row["text"]} for row in chunk]
-        image_inputs = [{"image": row["image"]} for row in chunk]
-        text_emb = embedding_batch(model, text_inputs, device)
-        image_emb = embedding_batch(model, image_inputs, device)
+    total = len(rows)
+    for index, chunk in enumerate(_batched(rows, batch_size)):
+        if task == "clip":
+            text_emb, image_emb = _clip_embeddings(model, chunk, device)
+        else:
+            text_inputs = [{"text": row["text"]} for row in chunk]
+            image_inputs = [{"image": row["image"]} for row in chunk]
+            text_emb = embedding_batch(model, text_inputs, device)
+            image_emb = embedding_batch(model, image_inputs, device)
         sim = text_emb @ image_emb.T
         labels = torch.arange(sim.shape[0], device=sim.device)
         text_ranks.extend((1 + (sim > sim[labels, labels].unsqueeze(1)).sum(dim=1)).tolist())
         sim_t = sim.T
         image_ranks.extend((1 + (sim_t > sim_t[labels, labels].unsqueeze(1)).sum(dim=1)).tolist())
+        if (index + 1) % 20 == 0:
+            done = len(text_ranks)
+            print(
+                f"  [progress] {done}/{total} samples ({done / total * 100:.1f}%) "
+                f"t2i_mrr={_mrr(text_ranks):.4f} i2t_mrr={_mrr(image_ranks):.4f}",
+                flush=True,
+            )
     return {
         "text_to_image": rank_metrics(text_ranks, ks),
         "image_to_text": rank_metrics(image_ranks, ks),
@@ -173,7 +220,7 @@ def main() -> None:
         raise RuntimeError(f"No rows for split {args.split!r} in {args.data_path}")
 
     if args.task in {"clip", "vl_embedding"}:
-        metrics = evaluate_in_batch(model, rows, device, args.batch_size, (1, 5, 10))
+        metrics = evaluate_in_batch(model, rows, device, args.batch_size, (1, 5, 10), args.task)
     else:
         negative_keys = [f"negative_{i}" for i in range(1, args.num_negatives + 1)
                          if f"negative_{i}" in rows[0]]
