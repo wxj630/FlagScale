@@ -180,7 +180,20 @@ def autocast_context(device: torch.device, dtype_name: str, platform: Any = None
         return contextlib.nullcontext()
 
 
-def save_model(model: nn.Module, processor: Any, output_dir: Path, task: str) -> None:
+def save_model(
+    model: nn.Module,
+    processor: Any,
+    output_dir: Path,
+    task: str,
+    final: bool = True,
+) -> None:
+    """Write a checkpoint.
+
+    ``final`` marks the completed run: only then is ``training_complete.json``
+    written, so a resume or an evaluator can tell a finished model from an
+    intermediate epoch snapshot.
+    """
+
     if not rank_zero():
         return
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -190,8 +203,9 @@ def save_model(model: nn.Module, processor: Any, output_dir: Path, task: str) ->
         processor.save_pretrained(output_dir)
     else:
         base.save_pretrained(output_dir)
-    with (output_dir / "training_complete.json").open("w", encoding="utf-8") as file:
-        json.dump({"task": task, "world_size": int(os.environ.get("WORLD_SIZE", "1"))}, file, indent=2)
+    if final:
+        with (output_dir / "training_complete.json").open("w", encoding="utf-8") as file:
+            json.dump({"task": task, "world_size": int(os.environ.get("WORLD_SIZE", "1"))}, file, indent=2)
 
 
 def init_wandb(train_cfg: DictConfig, model_cfg: DictConfig, output_dir: Path) -> Any:
@@ -426,6 +440,7 @@ def train(config: DictConfig) -> None:
     epochs = int(train_cfg.get("epochs", 3))
     if epochs < 1:
         raise ValueError("train.epochs must be at least 1")
+    save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
     grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
     temperature = float(train_cfg.get("temperature", 0.05))
     dtype_name = str(model_cfg.get("torch_dtype", "bf16"))
@@ -462,6 +477,16 @@ def train(config: DictConfig) -> None:
                         "epoch": epoch,
                     }
                 )
+
+        # Snapshot after every epoch. These runs take hours to days, so a crash
+        # between epochs previously cost the entire run: the only save happened
+        # after all epochs finished.
+        if save_every_epoch:
+            epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
+            if dist.is_initialized():
+                dist.barrier()
+            save_model(model, processor, epoch_dir, task, final=False)
+            log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
 
     test_loss = evaluate_epoch(model, processor, test_loader, task, device, temperature, dtype_name)
     if rank_zero():
