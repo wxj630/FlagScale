@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 from omegaconf import DictConfig
 
@@ -101,6 +103,14 @@ class Qwen3VLEmbeddingModel(RetrievalModel):
     def save_pretrained(self, output_dir: str) -> None:
         self.backbone.save_pretrained(output_dir)
         self.processor.save_pretrained(output_dir)
+        # The projection is a task head outside the HF checkpoint; without it a
+        # reloaded model would score through a freshly initialised projection
+        # and the fine-tuning would be silently lost.
+        if not isinstance(self.projection, torch.nn.Identity):
+            torch.save(
+                self.projection.state_dict(),
+                str(Path(output_dir) / "projection.pt"),
+            )
 
     @classmethod
     def from_pretrained(
@@ -134,6 +144,13 @@ class Qwen3VLEmbeddingModel(RetrievalModel):
         )
         del conditional_model
         model.load_to_device(device)
+        # Restore a trained projection when the checkpoint carries one, so an
+        # evaluation or a resumed run uses the fine-tuned head rather than a
+        # random one.
+        projection_path = Path(str(model_cfg.model_path)) / "projection.pt"
+        if not isinstance(model.projection, torch.nn.Identity) and projection_path.is_file():
+            state = torch.load(str(projection_path), map_location="cpu")
+            model.projection.load_state_dict(state)
         if bool(model_cfg.get("freeze_backbone", False)):
             model.freeze_backbone()
         elif bool(model_cfg.get("freeze_vision", False)):
