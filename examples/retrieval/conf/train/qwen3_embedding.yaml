@@ -1,8 +1,9 @@
 name: qwen3-embedding-0.6b
 task: embedding
 seed: 42
-# The 0.6B encoder at max_length 2048 peaks near 80GB at batch 16, so batch 12
-# keeps a safety margin; the accumulation window raises the effective batch to 72.
+# Single-text inputs measure p99=434 / max=513 tokens, so max_length 512 keeps
+# the whole distribution while cutting padding and activation memory roughly
+# fourfold versus the previous 2048 (which OOMed at batch 8).
 batch_size: 8
 gradient_accumulation_steps: 8
 epochs: 3
@@ -13,7 +14,7 @@ output_dir: /flagos-search-ckpts/${train.name}
 model:
   model_type: qwen3_embedding
   model_path: /flagos-search-models/Qwen3-Embedding-0.6B
-  max_length: 2048
+  max_length: 512
   torch_dtype: bf16
   freeze_backbone: false
 
