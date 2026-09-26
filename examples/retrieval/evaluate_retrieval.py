@@ -67,6 +67,7 @@ def _batched(items: list, batch_size: int):
         yield items[start : start + batch_size]
 
 
+@torch.no_grad()
 def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int, negative_keys: list[str]):
     """Rank each query's positive against its hard negatives."""
 
