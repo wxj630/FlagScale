@@ -185,6 +185,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=0.05, help="unused for ranking; kept for clarity")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", default=None, help="write metrics JSON here")
+    parser.add_argument(
+        "--train-config",
+        default=None,
+        help="training YAML for this model; its model.* settings (use_score_head, "
+             "projection_dim, ...) are reused so evaluation matches training",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -192,17 +198,35 @@ def main() -> None:
         torch.flagos.set_device(0)
 
     model_path = args.checkpoint or args.model_path
-    model_cfg = OmegaConf.create(
-        {
-            "model_type": args.model_type,
-            "model_path": model_path,
-            "max_length": args.max_length,
-            "torch_dtype": "bf16",
-            "freeze_backbone": False,
-            "use_score_head": args.task == "reranker",
-            "projection_dim": 0 if args.task != "vl_embedding" else 0,
-        }
-    )
+    # Take the model settings from the training config when one is given. A
+    # previous run inferred use_score_head from the task name and silently
+    # evaluated a trained reranker through a freshly initialised score head,
+    # which made a correctly fine-tuned model look worse than random.
+    if args.train_config:
+        train_cfg = OmegaConf.load(args.train_config)
+        model_cfg = OmegaConf.create(
+            {
+                "model_type": train_cfg.model.get("model_type", args.model_type),
+                "model_path": model_path,
+                "max_length": int(train_cfg.model.get("max_length", args.max_length)),
+                "torch_dtype": str(train_cfg.model.get("torch_dtype", "bf16")),
+                "freeze_backbone": bool(train_cfg.model.get("freeze_backbone", False)),
+                "use_score_head": bool(train_cfg.model.get("use_score_head", False)),
+                "projection_dim": int(train_cfg.model.get("projection_dim", 0)),
+            }
+        )
+    else:
+        model_cfg = OmegaConf.create(
+            {
+                "model_type": args.model_type,
+                "model_path": model_path,
+                "max_length": args.max_length,
+                "torch_dtype": "bf16",
+                "freeze_backbone": False,
+                "use_score_head": False,
+                "projection_dim": 0,
+            }
+        )
     model, _ = build_retrieval_model(args.model_type, model_cfg, device)
     model.eval()
 
