@@ -248,6 +248,12 @@ def main() -> None:
     else:
         negative_keys = [f"negative_{i}" for i in range(1, args.num_negatives + 1)
                          if f"negative_{i}" in rows[0]]
+        # Rank by length before batching. Every query's candidate set stays in
+        # one batch, so ordering by length cannot change any query's result, but
+        # it stops a single long row from padding a whole batch to the max: with
+        # random order each 192-sequence batch padded to 640 tokens, after
+        # sorting the batch max tracks the local length instead.
+        rows.sort(key=lambda row: len(row.get("anchor", "")) + len(row.get("positive", "")))
         ranks = evaluate_ranked(model, rows, args.task, device, args.batch_size, negative_keys)
         metrics = rank_metrics(ranks, (1, 5, 10))
         metrics["num_negatives"] = len(negative_keys)
