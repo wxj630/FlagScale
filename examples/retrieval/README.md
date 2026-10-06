@@ -130,9 +130,46 @@ base weights. For CLIP and VL embedding the script does symmetric in-batch
 image/text retrieval and reports both directions. The script is single-process
 and does not need torchrun; run it on `cpu` or one accelerator.
 
+`evaluate_models.sh` wraps the same script for a base-vs-fine-tuned comparison
+over several models, with identical settings on both sides:
+
+```bash
+# all five models, base and fine-tuned, on their held-out test splits
+./evaluate_models.sh
+
+# one model, validation split, small sample
+MODELS=bge_m3 SPLIT=validation MAX_SAMPLES=500 ./evaluate_models.sh
+
+# only the base models, waiting until the device is free first
+TAGS=base WAIT_FOR_IDLE=1 ./evaluate_models.sh
+```
+
+Both checkpoints of a pair must use the same split and sample count; a mismatch
+between 128 and 256 samples once produced a wrong conclusion, which is why the
+wrapper always evaluates a pair symmetrically. Model settings are read from the
+training YAML, so a reranker trained with native yes/no logits is not scored
+through a random head.
+
+## Monitoring long runs
+
+`monitor_training.sh` appends a health verdict every interval (default 2h) so an
+unattended run can be audited afterwards. Each pass reports whether a training
+process is alive, whether its step is advancing, whether the loss is below the
+random baseline (ln2 for the binary objective) and whether the device is busy:
+
+```bash
+MONITOR_INTERVAL_SECONDS=7200 ./monitor_training.sh /flagos-search-ckpts/monitor.log
+```
+
 ## Output
 
 Each completed run writes a Hugging Face Transformers checkpoint to
-`/flagos-search-ckpts/<model-name>` and a small `training_complete.json` marker.
+`/flagos-search-ckpts/<model-name>` plus a `training_complete.json` marker.
+An intermediate snapshot is also written after **every epoch** to
+`<model-name>/checkpoint-epoch-<n>/` (controlled by `train.save_every_epoch`,
+default on). These 8B runs take days, so a crash between epochs would otherwise
+discard the whole run; only the final directory carries `training_complete.json`,
+which makes intermediates distinguishable from a finished model.
+
 FlagScale's Hydra, host and runner logs are created under the same experiment
 directory.
