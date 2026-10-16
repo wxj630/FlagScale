@@ -14,7 +14,7 @@ def main() -> None:
     model_cfg = OmegaConf.create(
         {
             "model_type": "bge_m3",
-            "model_path": "/flagos-search-models/bge-m3/bge-m3",
+            "model_path": "/flagos-retrieval-models/bge-m3/bge-m3",
             "max_length": 128,
             "torch_dtype": "bf16",
             "freeze_backbone": False,
@@ -25,7 +25,7 @@ def main() -> None:
     print(f"loaded parameters={sum(p.numel() for p in model.parameters())}", flush=True)
     data_cfg = OmegaConf.create(
         {
-            "path": "/flagos-search-datasets/t2ranking/t2ranking/triplet-15",
+            "path": "/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15",
             "train_split": "train",
             "validation_split": "validation",
             "test_split": "test",

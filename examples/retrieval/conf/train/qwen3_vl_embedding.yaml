@@ -13,11 +13,11 @@ gradient_accumulation_steps: 4
 epochs: 3
 log_every: 5
 temperature: 0.05
-output_dir: /flagos-search-ckpts/${train.name}
+output_dir: /flagos-retrieval-ckpts/${train.name}
 
 model:
   model_type: qwen3_vl_embedding
-  model_path: /flagos-search-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B
+  model_path: /flagos-retrieval-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B
   max_length: 2048
   torch_dtype: bf16
   freeze_backbone: false
@@ -26,9 +26,9 @@ model:
   projection_dim: 1024
 
 data:
-  path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
-  validation_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
-  test_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
+  path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  validation_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  test_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
   train_split: train
   validation_split: validation
   test_split: all

@@ -9,7 +9,7 @@ defaults:
 
 experiment:
   exp_name: retrieval-${train.name}
-  exp_dir: /flagos-search-ckpts/${train.name}
+  exp_dir: /flagos-retrieval-ckpts/${train.name}
   seed: ${train.seed}
   task:
     type: train

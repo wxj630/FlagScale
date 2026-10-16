@@ -7,19 +7,19 @@ batch_size: 128
 gradient_accumulation_steps: 1
 epochs: 3
 log_every: 10
-output_dir: /flagos-search-ckpts/${train.name}
+output_dir: /flagos-retrieval-ckpts/${train.name}
 
 model:
   model_type: clip_vit_large
-  model_path: /flagos-search-models/clip-vit-large-patch14/clip-vit-large-patch14
+  model_path: /flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14
   max_length: 77
   torch_dtype: bf16
   freeze_backbone: false
 
 data:
-  path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
-  validation_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
-  test_path: /flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
+  path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  validation_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train
+  test_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
   train_split: train
   validation_split: validation
   test_split: all

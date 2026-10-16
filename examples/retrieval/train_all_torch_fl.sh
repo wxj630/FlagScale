@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PYTHON="${PYTHON:-/flagos-search-codes/torch-fl-cuda/.venv/bin/python}"
-RUN_ROOT="${RUN_ROOT:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2}"
+RUN_ROOT="${RUN_ROOT:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2}"
 PROJECT="${WANDB_PROJECT:-flagscale-retrieval-torch-fl-cuda}"
 export FLAGSCALE_PYTHON_ENV="${FLAGSCALE_PYTHON_ENV:-/flagos-search-codes/torch-fl-cuda/.venv}"
 export FLAGSCALE_DEVICE=flagos

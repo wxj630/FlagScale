@@ -16,22 +16,22 @@ from flagscale.train.losses.retrieval import loss_for_batch
 _MODELS = {
     "qwen3_embedding": {
         "task": "embedding",
-        "path": "/flagos-search-models/Qwen3-Embedding-0.6B",
-        "data": "/flagos-search-datasets/t2ranking/t2ranking/triplet-15",
+        "path": "/flagos-retrieval-models/Qwen3-Embedding-0.6B",
+        "data": "/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15",
         "max_length": 128,
         "num_negatives": 1,
     },
     "clip_vit_large": {
         "task": "clip",
-        "path": "/flagos-search-models/clip-vit-large-patch14/clip-vit-large-patch14",
-        "data": "/flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train",
+        "path": "/flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14",
+        "data": "/flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train",
         "max_length": 77,
         "num_negatives": 1,
     },
     "qwen3_reranker": {
         "task": "reranker",
-        "path": "/flagos-search-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B",
-        "data": "/flagos-search-datasets/t2ranking/t2ranking/triplet-15",
+        "path": "/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B",
+        "data": "/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15",
         "max_length": 128,
         "num_negatives": 1,
         "freeze_backbone": True,
@@ -39,8 +39,8 @@ _MODELS = {
     },
     "qwen3_vl_embedding": {
         "task": "vl_embedding",
-        "path": "/flagos-search-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B",
-        "data": "/flagos-search-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train",
+        "path": "/flagos-retrieval-models/Qwen3-VL-Embedding-8B/Qwen3-VL-Embedding-8B",
+        "data": "/flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/train",
         # Image placeholders expand to a few hundred tokens; do not truncate
         # them in the processor smoke test.
         "max_length": 2048,

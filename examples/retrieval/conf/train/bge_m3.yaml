@@ -6,19 +6,19 @@ gradient_accumulation_steps: 4
 epochs: 3
 log_every: 10
 temperature: 0.05
-output_dir: /flagos-search-ckpts/${train.name}
+output_dir: /flagos-retrieval-ckpts/${train.name}
 
 model:
   model_type: bge_m3
-  model_path: /flagos-search-models/bge-m3/bge-m3
+  model_path: /flagos-retrieval-models/bge-m3/bge-m3
   max_length: 512
   torch_dtype: bf16
   freeze_backbone: false
 
 data:
-  path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
-  validation_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
-  test_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  validation_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  test_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
   train_split: train
   validation_split: validation
   test_split: test

@@ -1,7 +1,7 @@
 # Retrieval model training with FlagScale
 
 This example adds a FlagScale `native` training entrypoint for the five local
-checkpoints under `/flagos-search-models`:
+checkpoints under `/flagos-retrieval-models`:
 
 | Config | Model | Data | Objective |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ checkpoints under `/flagos-search-models`:
 
 The runner is FlagScale: Hydra composes the YAML, the native backend launches
 the built-in `flagscale/train/train_retrieval.py` entrypoint through `torchrun`,
-and logs/checkpoints are placed in `/flagos-search-ckpts/<model-name>`. Users
+and logs/checkpoints are placed in `/flagos-retrieval-ckpts/<model-name>`. Users
 only select the model config; they do not need to invoke a model-specific
 `train.py` directly.
 
@@ -118,11 +118,11 @@ negatives and report Recall@1/5/10 and MRR:
 ```bash
 python examples/retrieval/evaluate_retrieval.py \
   --model-type bge_m3 \
-  --model-path /flagos-search-models/bge-m3/bge-m3 \
+  --model-path /flagos-retrieval-models/bge-m3/bge-m3 \
   --task embedding \
-  --data-path /flagos-search-datasets/t2ranking/t2ranking/triplet-15 \
+  --data-path /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15 \
   --split validation --num-negatives 15 --batch-size 16 --max-samples 512 \
-  --device flagos --output /flagos-search-ckpts/eval/bge_m3_val.json
+  --device flagos --output /flagos-retrieval-ckpts/eval/bge_m3_val.json
 ```
 
 Pass `--checkpoint <trained-dir>` to evaluate a fine-tuned model instead of the
@@ -158,13 +158,13 @@ process is alive, whether its step is advancing, whether the loss is below the
 random baseline (ln2 for the binary objective) and whether the device is busy:
 
 ```bash
-MONITOR_INTERVAL_SECONDS=7200 ./monitor_training.sh /flagos-search-ckpts/monitor.log
+MONITOR_INTERVAL_SECONDS=7200 ./monitor_training.sh /flagos-retrieval-ckpts/monitor.log
 ```
 
 ## Output
 
 Each completed run writes a Hugging Face Transformers checkpoint to
-`/flagos-search-ckpts/<model-name>` plus a `training_complete.json` marker.
+`/flagos-retrieval-ckpts/<model-name>` plus a `training_complete.json` marker.
 An intermediate snapshot is also written after **every epoch** to
 `<model-name>/checkpoint-epoch-<n>/` (controlled by `train.save_every_epoch`,
 default on). These 8B runs take days, so a crash between epochs would otherwise

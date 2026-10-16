@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -u
 
-OUT="${1:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2-monitor.log}"
+OUT="${1:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2-monitor.log}"
 INTERVAL="${MONITOR_INTERVAL_SECONDS:-1800}"
-RUN_ROOT="${RUN_ROOT:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2}"
+RUN_ROOT="${RUN_ROOT:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2}"
 
 mkdir -p "$(dirname "$OUT")"
 while true; do

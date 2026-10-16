@@ -15,9 +15,9 @@
 #   QUEUE_LOG_GLOB            queue logs whose tails are shown when idle
 set -u
 
-OUT="${1:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2-monitor2h.log}"
+OUT="${1:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2-monitor2h.log}"
 INTERVAL="${MONITOR_INTERVAL_SECONDS:-7200}"
-RUN_ROOT="${RUN_ROOT:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2}"
+RUN_ROOT="${RUN_ROOT:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2}"
 STATE="${STATE:-/tmp/retrieval-monitor.state}"
 QUEUE_LOG_GLOB="${QUEUE_LOG_GLOB:-}"
 

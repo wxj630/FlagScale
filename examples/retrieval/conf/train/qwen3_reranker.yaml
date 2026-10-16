@@ -11,11 +11,11 @@ batch_size: 32
 gradient_accumulation_steps: 1
 epochs: 3
 log_every: 5
-output_dir: /flagos-search-ckpts/${train.name}
+output_dir: /flagos-retrieval-ckpts/${train.name}
 
 model:
   model_type: qwen3_reranker
-  model_path: /flagos-search-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
+  model_path: /flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
   max_length: 640
   torch_dtype: bf16
   # Fine-tune all 8B weights using the checkpoint's own yes/no scoring
@@ -28,9 +28,9 @@ model:
   gradient_checkpointing: true
 
 data:
-  path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
-  validation_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
-  test_path: /flagos-search-datasets/t2ranking/t2ranking/triplet-15
+  path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  validation_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  test_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
   train_split: train
   validation_split: validation
   test_split: test

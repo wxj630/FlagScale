@@ -35,7 +35,7 @@ cd "$ROOT_DIR"
 # Same default interpreter as train_all_torch_fl.sh: the training environment is
 # the one that has torch_fl, transformers and omegaconf installed.
 PYTHON="${PYTHON:-${FLAGSCALE_PYTHON_ENV:-/flagos-search-codes/torch-fl-cuda/.venv}/bin/python}"
-RUN_ROOT="${RUN_ROOT:-/flagos-search-ckpts/torch-fl-cuda-3epoch-v2}"
+RUN_ROOT="${RUN_ROOT:-/flagos-retrieval-ckpts/torch-fl-cuda-3epoch-v2}"
 EVAL_DIR="${EVAL_DIR:-${RUN_ROOT}/eval}"
 MODELS="${MODELS:-bge_m3 qwen3_embedding qwen3_vl_embedding qwen3_reranker clip_vit_large}"
 TAGS="${TAGS:-base trained}"
