@@ -44,22 +44,22 @@ Checkpointing
 from __future__ import annotations
 
 import contextlib
-from typing import Any, Iterable, Iterator
+from typing import Iterator
 
 import torch
 from torch import nn
 
-# Attribute paths that hold a list of transformer blocks across the backbone
-# families used by the retrieval adapters.  Sharding block-by-block lets FSDP2
-# release each block's gather before the next one runs; sharding only the root
-# would gather the whole model at once and defeat the point.
-_BLOCK_PATHS = (
-    "model.layers",           # Qwen2/Qwen3, Llama-style decoders
-    "encoder.layer",          # BERT-style encoders (BGE, XLM-R)
-    "transformer.h",          # GPT-style
-    "vision_model.encoder.layers",   # CLIP vision tower
-    "text_model.encoder.layers",     # CLIP text tower
-)
+# The adapter wraps the Hugging Face backbone (``model.backbone``), so block
+# lists sit at e.g. ``backbone.encoder.layer`` for BERT-style encoders and
+# ``backbone.vision_model.encoder.layers`` for CLIP.  Rather than hardcoding a
+# path per family, discovery walks every submodule and keeps the repeated
+# block lists, which is what makes block-wise sharding possible: FSDP2 can then
+# release each block's gathered parameters before the next one runs, instead of
+# gathering the whole backbone at once.
+
+
+def _is_block_list(module: nn.Module) -> bool:
+    return isinstance(module, (nn.ModuleList, nn.Sequential)) and len(module) > 1
 
 
 def fsdp2_available() -> bool:
@@ -73,22 +73,29 @@ def fsdp2_available() -> bool:
 
 
 def iter_transformer_blocks(module: nn.Module) -> Iterator[nn.Module]:
-    """Yield the backbone's transformer block list members, deepest first.
+    """Yield the members of every repeated-block list, deepest first.
 
-    Falls back to an empty iterator when no known layout matches, in which case
-    :func:`apply_fsdp2` still shards the root module (correct, just coarser).
+    Multiple towers (CLIP's text and vision encoders) are both covered.  An
+    empty iterator means no block list was found; :func:`apply_fsdp2` then
+    shards the root module only, which is correct but coarser.
     """
 
-    for path in _BLOCK_PATHS:
-        target: Any = module
-        for part in path.split("."):
-            target = getattr(target, part, None)
-            if target is None:
-                break
-        if isinstance(target, (nn.ModuleList, nn.Sequential, list)) and len(target):
-            for block in reversed(list(target)):
-                yield block
-            return
+    found: list[nn.ModuleList] = []
+
+    def walk(current: nn.Module) -> None:
+        for child in current.children():
+            if _is_block_list(child):
+                found.append(child)
+            walk(child)
+
+    walk(module)
+    if not found:
+        return
+    # Deepest (shortest) containers last so inner blocks are sharded first.
+    found.sort(key=len)
+    for block_list in found:
+        for block in reversed(list(block_list)):
+            yield block
 
 
 def apply_fsdp2(
