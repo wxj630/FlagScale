@@ -104,14 +104,17 @@ def apply_fsdp2(
     world_size: int,
     compute_dtype: torch.dtype = torch.bfloat16,
     reduce_dtype: torch.dtype = torch.bfloat16,
-    reshard_after_forward: bool = False,
+    reshard_after_forward: bool = True,
     log=lambda msg: None,
 ) -> nn.Module:
     """Shard ``model`` in place with FSDP2 and return it.
 
-    ``reshard_after_forward=False`` mirrors the GR00T trainer: parameters stay
-    gathered between forward and backward so the recompute pass during
-    backward does not all-gather them a second time.
+    ``reshard_after_forward=True`` re-shards each block's parameters as soon as
+    its forward finishes, so only the block being computed is ever unsharded.
+    The GR00T trainer passes False (keep them gathered, skipping the backward
+    all-gather), but that keeps *every* block's parameters resident at once --
+    for an 8B model in fp32 that alone is ~30 GB per rank and overruns a 80 GB
+    card. True costs one extra all-gather per block and fits.
     """
 
     from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
