@@ -48,6 +48,19 @@ action: run
 # The retrieval entrypoint uses only checkpoint.save and logging.log_dir, but
 # keeping these fields lets FlagScale create its standard runner directories.
 train:
+  # How ranks are wired. `ddp` replicates the model on every rank (historical
+  # behaviour); `fsdp2` shards parameters, gradients and optimizer state with
+  # torch's composable FSDP, which divides the ~16-bytes-per-parameter budget by
+  # the world size instead of replicating it per card.
+  parallel: ${oc.env:FLAGSCALE_PARALLEL,ddp}
+
+  # Dtype the optimizer operates on. `bf16` matches the historical runs, where
+  # the moments are bf16 too -- with a 1e-5 learning rate that update is below
+  # bf16's 2^-8 resolution and gets rounded away. `fp32` keeps the update and
+  # is what GR00T/Megatron use; the forward/backward still run in
+  # `model.torch_dtype` through autocast (and FSDP2's MixedPrecisionPolicy).
+  master_dtype: ${oc.env:FLAGSCALE_MASTER_DTYPE,bf16}
+
   hardware:
     # `cuda` is the validated path on this host. `flagos` activates torch-fl's
     # PrivateUse1 device and requires a matching vendor environment.

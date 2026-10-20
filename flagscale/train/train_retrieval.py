@@ -68,6 +68,7 @@ from torch.utils.data import DataLoader
 from flagscale.models.retrieval import build_retrieval_model, unwrap_model
 from flagscale.train.datasets.retrieval import build_split_loaders
 from flagscale.train.losses.retrieval import loss_for_batch
+from flagscale.train.utils import parallel as parallel_utils
 
 try:
     from flagscale.platforms import get_platform
@@ -186,23 +187,61 @@ def save_model(
     output_dir: Path,
     task: str,
     final: bool = True,
+    source_dir: Path | None = None,
 ) -> None:
     """Write a checkpoint.
 
     ``final`` marks the completed run: only then is ``training_complete.json``
     written, so a resume or an evaluator can tell a finished model from an
     intermediate epoch snapshot.
+
+    Under FSDP2 the parameters are DTensors and ``state_dict()`` would yield
+    shards.  The full state is gathered instead -- a collective, so every rank
+    must call this function -- and written as a single ``model.safetensors``
+    next to a copy of the source checkpoint's config/tokenizer files, which is
+    the layout the evaluation entrypoint expects.  Materialising an unsharded
+    model instead would double peak memory for an 8B adapter.
     """
+
+    sharded = any(
+        type(parameter).__name__ == "DTensor" for parameter in model.parameters()
+    )
+    gathered = parallel_utils.full_state_dict(unwrap_model(model)) if sharded else None
 
     if not rank_zero():
         return
     output_dir.mkdir(parents=True, exist_ok=True)
-    base = unwrap_model(model)
-    if task == "clip":
-        base.save_pretrained(output_dir)
-        processor.save_pretrained(output_dir)
+
+    if gathered is not None:
+        import shutil
+
+        from safetensors.torch import save_file
+
+        if source_dir is None or not Path(source_dir).is_dir():
+            raise RuntimeError(
+                "FSDP2 checkpointing needs the source model directory to copy "
+                "config/tokenizer files into the snapshot."
+            )
+        weights = {k.removeprefix("_orig_mod."): v for k, v in gathered.items()}
+        save_file(weights, str(output_dir / "model.safetensors"))
+        for item in Path(source_dir).iterdir():
+            if item.is_file() and item.name not in {
+                "model.safetensors",
+                "pytorch_model.bin",
+                "training_complete.json",
+            }:
+                shutil.copy2(item, output_dir / item.name)
+        if processor is not None:
+            with contextlib.suppress(Exception):
+                processor.save_pretrained(output_dir)
     else:
-        base.save_pretrained(output_dir)
+        base = unwrap_model(model)
+        if task == "clip":
+            base.save_pretrained(output_dir)
+            processor.save_pretrained(output_dir)
+        else:
+            base.save_pretrained(output_dir)
+
     if final:
         with (output_dir / "training_complete.json").open("w", encoding="utf-8") as file:
             json.dump({"task": task, "world_size": int(os.environ.get("WORLD_SIZE", "1"))}, file, indent=2)
@@ -310,13 +349,26 @@ def train_epoch(
     window_loss = 0.0
     window_batches = 0
     optimizer_steps = 0
-    for batch in loader:
+    # One-batch lookahead: the final micro-batch of an epoch must run with
+    # gradient sync enabled even when it does not fill a whole accumulation
+    # window, otherwise the partial-window step below would update from
+    # gradients that were never reduced across ranks.
+    stream = iter(loader)
+    batch = next(stream, None)
+    while batch is not None:
+        nxt = next(stream, None)
         with autocast_context(device, dtype_name):
             raw_loss = loss_for_batch(model, processor, task, batch, device, temperature)
             loss = raw_loss / grad_accum
         if not torch.isfinite(raw_loss):
             raise FloatingPointError(f"Non-finite training loss: {raw_loss.detach().item()}")
-        loss.backward()
+        # Only the last micro-step of an accumulation window needs the gradient
+        # all-reduce; syncing on every micro-step multiplies collective traffic
+        # by grad_accum, which dominates wall time once ranks span hosts.
+        is_window_end = (micro_count + 1) >= grad_accum or nxt is None
+        with contextlib.nullcontext() if is_window_end else parallel_utils.gradient_sync_disabled(model):
+            loss.backward()
+        batch = nxt
         micro_count += 1
         micro_batches += 1
         batch_loss = float(raw_loss.detach())
@@ -425,7 +477,43 @@ def train(config: DictConfig) -> None:
         pin_memory=bool(platform and platform.supports_pin_memory()),
     )
 
-    if world_size > 1:
+    # ---- parallelism + precision -------------------------------------------
+    # ``parallel`` selects how ranks are wired:
+    #   ddp   - full replica per rank (the historical behaviour)
+    #   fsdp2 - parameters/grads/optimizer state sharded across ranks
+    # ``master_dtype`` decides what the optimizer sees.  With bf16 parameters
+    # AdamW's moments are bf16 too, and a 1e-5 step falls below bf16's 2^-8
+    # resolution, so the update is rounded away.  fp32 keeps the update; the
+    # forward/backward still run in ``dtype_name`` via autocast (and via FSDP2's
+    # MixedPrecisionPolicy when sharded).
+    hardware_cfg = train_cfg.get("hardware", {})
+    parallel_mode = str(train_cfg.get("parallel", hardware_cfg.get("parallel", "ddp"))).lower()
+    master_dtype_name = str(train_cfg.get("master_dtype", "bf16")).lower()
+    master_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(
+        master_dtype_name, torch.bfloat16
+    )
+    compute_dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(dtype_name, torch.bfloat16)
+
+    if master_dtype != torch.bfloat16:
+        converted = unwrap_model(model).to(dtype=master_dtype)
+        model = converted
+        log(f"parameters cast to master dtype {master_dtype} (optimizer state will be {master_dtype})")
+
+    if parallel_mode == "fsdp2":
+        if not parallel_utils.fsdp2_available():
+            raise RuntimeError(
+                "train.parallel=fsdp2 requires torch>=2.6 with composable FSDP; "
+                "the installed torch does not expose torch.distributed._composable.fsdp."
+            )
+        model = parallel_utils.apply_fsdp2(
+            model,
+            device_type=device.type,
+            world_size=max(world_size, 1),
+            compute_dtype=compute_dtype,
+            reduce_dtype=compute_dtype,
+            log=log,
+        )
+    elif world_size > 1:
         model = DDP(
             model,
             device_ids=[device.index]
@@ -433,6 +521,8 @@ def train(config: DictConfig) -> None:
             else None,
             find_unused_parameters=False,
         )
+    log(f"parallelism={parallel_mode} master_dtype={master_dtype_name} compute_dtype={dtype_name}")
+
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable parameters remain; set model.freeze_backbone=false")
@@ -485,7 +575,7 @@ def train(config: DictConfig) -> None:
             epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
             if dist.is_initialized():
                 dist.barrier()
-            save_model(model, processor, epoch_dir, task, final=False)
+            save_model(model, processor, epoch_dir, task, final=False, source_dir=model_cfg.model_path)
             log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
 
     test_loss = evaluate_epoch(model, processor, test_loader, task, device, temperature, dtype_name)
@@ -502,7 +592,7 @@ def train(config: DictConfig) -> None:
 
     if dist.is_initialized():
         dist.barrier()
-    save_model(model, processor, output_dir, task)
+    save_model(model, processor, output_dir, task, source_dir=model_cfg.model_path)
     if rank_zero():
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
             json.dump(
