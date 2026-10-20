@@ -477,6 +477,8 @@ def train(config: DictConfig) -> None:
         pin_memory=bool(platform and platform.supports_pin_memory()),
     )
 
+    dtype_name = str(model_cfg.get("torch_dtype", "bf16"))
+
     # ---- parallelism + precision -------------------------------------------
     # ``parallel`` selects how ranks are wired:
     #   ddp   - full replica per rank (the historical behaviour)
@@ -533,7 +535,6 @@ def train(config: DictConfig) -> None:
     save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
     grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
     temperature = float(train_cfg.get("temperature", 0.05))
-    dtype_name = str(model_cfg.get("torch_dtype", "bf16"))
     output_dir = Path(str(train_cfg.output_dir))
     wandb_run = init_wandb(train_cfg, model_cfg, output_dir)
     clip_grad = float(optim_cfg.get("max_grad_norm", 1.0))
