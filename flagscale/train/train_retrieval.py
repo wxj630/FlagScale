@@ -509,11 +509,6 @@ def train(config: DictConfig) -> None:
     )
     compute_dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(dtype_name, torch.bfloat16)
 
-    if master_dtype != torch.bfloat16:
-        converted = unwrap_model(model).to(dtype=master_dtype)
-        model = converted
-        log(f"parameters cast to master dtype {master_dtype} (optimizer state will be {master_dtype})")
-
     if parallel_mode == "fsdp2":
         if not parallel_utils.fsdp2_available():
             raise RuntimeError(
@@ -528,6 +523,18 @@ def train(config: DictConfig) -> None:
             reduce_dtype=compute_dtype,
             log=log,
         )
+        if master_dtype != torch.bfloat16:
+            # Cast *after* sharding: converting an unsharded 8B model to fp32
+            # briefly holds the bf16 and fp32 copies at once (+30 GB), which is
+            # what exhausted the card.  Post-shard each rank only converts its
+            # own slice.
+            for parameter in model.parameters():
+                with torch.no_grad():
+                    parameter.data = parameter.data.to(dtype=master_dtype)
+            log(
+                f"parameters cast to master dtype {master_dtype} after sharding "
+                f"(optimizer state will be {master_dtype})"
+            )
     elif world_size > 1:
         model = DDP(
             model,
@@ -536,6 +543,10 @@ def train(config: DictConfig) -> None:
             else None,
             find_unused_parameters=False,
         )
+    if parallel_mode != "fsdp2" and master_dtype != torch.bfloat16:
+        converted = unwrap_model(model).to(dtype=master_dtype)
+        model = converted
+        log(f"parameters cast to master dtype {master_dtype} (optimizer state will be {master_dtype})")
     log(f"parallelism={parallel_mode} master_dtype={master_dtype_name} compute_dtype={dtype_name}")
 
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
