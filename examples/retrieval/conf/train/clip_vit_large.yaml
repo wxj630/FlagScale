@@ -7,7 +7,8 @@ batch_size: 128
 gradient_accumulation_steps: 1
 epochs: 3
 log_every: 10
-output_dir: /flagos-retrieval-ckpts/${train.name}
+# Default location; override with train.output_dir=... to keep runs apart.
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
 
 model:
   model_type: clip_vit_large

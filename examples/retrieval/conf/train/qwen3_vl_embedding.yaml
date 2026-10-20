@@ -13,7 +13,8 @@ gradient_accumulation_steps: 4
 epochs: 3
 log_every: 5
 temperature: 0.05
-output_dir: /flagos-retrieval-ckpts/${train.name}
+# Default location; override with train.output_dir=... to keep runs apart.
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
 
 model:
   model_type: qwen3_vl_embedding
