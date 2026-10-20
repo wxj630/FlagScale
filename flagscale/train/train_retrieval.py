@@ -476,7 +476,23 @@ def train(config: DictConfig) -> None:
     data_cfg = train_cfg.data
     optim_cfg = train_cfg.optimizer
     model_type = str(model_cfg.get("model_type", train_cfg.name))
-    model, processor = build_retrieval_model(model_type, model_cfg, device)
+
+    # Resolve parallelism and precision before the weights are loaded: loading
+    # straight into the master dtype avoids holding a bf16 copy and an fp32 copy
+    # of the model at the same time (which is what exhausted an 80 GB card when
+    # an 8B adapter was converted in place).
+    hardware_cfg = train_cfg.get("hardware", {})
+    parallel_mode = str(train_cfg.get("parallel", hardware_cfg.get("parallel", "ddp"))).lower()
+    master_dtype_name = str(train_cfg.get("master_dtype", "bf16")).lower()
+    master_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(
+        master_dtype_name, torch.bfloat16
+    )
+    load_cfg = model_cfg
+    if master_dtype_name != str(model_cfg.get("torch_dtype", "bf16")).lower():
+        load_cfg = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
+        load_cfg.torch_dtype = master_dtype_name
+        log(f"loading weights directly in master dtype {master_dtype_name}")
+    model, processor = build_retrieval_model(model_type, load_cfg, device)
     if bool(model_cfg.get("gradient_checkpointing", False)):
         if unwrap_model(model).enable_gradient_checkpointing():
             log("gradient checkpointing enabled")
@@ -501,12 +517,6 @@ def train(config: DictConfig) -> None:
     # resolution, so the update is rounded away.  fp32 keeps the update; the
     # forward/backward still run in ``dtype_name`` via autocast (and via FSDP2's
     # MixedPrecisionPolicy when sharded).
-    hardware_cfg = train_cfg.get("hardware", {})
-    parallel_mode = str(train_cfg.get("parallel", hardware_cfg.get("parallel", "ddp"))).lower()
-    master_dtype_name = str(train_cfg.get("master_dtype", "bf16")).lower()
-    master_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(
-        master_dtype_name, torch.bfloat16
-    )
     compute_dtype = {"fp16": torch.float16, "fp32": torch.float32}.get(dtype_name, torch.bfloat16)
 
     if parallel_mode == "fsdp2":
@@ -523,18 +533,6 @@ def train(config: DictConfig) -> None:
             reduce_dtype=compute_dtype,
             log=log,
         )
-        if master_dtype != torch.bfloat16:
-            # Cast *after* sharding: converting an unsharded 8B model to fp32
-            # briefly holds the bf16 and fp32 copies at once (+30 GB), which is
-            # what exhausted the card.  Post-shard each rank only converts its
-            # own slice.
-            for parameter in model.parameters():
-                with torch.no_grad():
-                    parameter.data = parameter.data.to(dtype=master_dtype)
-            log(
-                f"parameters cast to master dtype {master_dtype} after sharding "
-                f"(optimizer state will be {master_dtype})"
-            )
     elif world_size > 1:
         model = DDP(
             model,
@@ -543,10 +541,6 @@ def train(config: DictConfig) -> None:
             else None,
             find_unused_parameters=False,
         )
-    if parallel_mode != "fsdp2" and master_dtype != torch.bfloat16:
-        converted = unwrap_model(model).to(dtype=master_dtype)
-        model = converted
-        log(f"parameters cast to master dtype {master_dtype} (optimizer state will be {master_dtype})")
     log(f"parallelism={parallel_mode} master_dtype={master_dtype_name} compute_dtype={dtype_name}")
 
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
