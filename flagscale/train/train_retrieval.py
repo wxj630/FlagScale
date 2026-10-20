@@ -188,6 +188,7 @@ def save_model(
     task: str,
     final: bool = True,
     source_dir: Path | None = None,
+    sharded: bool = False,
 ) -> None:
     """Write a checkpoint.
 
@@ -203,9 +204,6 @@ def save_model(
     model instead would double peak memory for an 8B adapter.
     """
 
-    sharded = any(
-        type(parameter).__name__ == "DTensor" for parameter in model.parameters()
-    )
     gathered = parallel_utils.full_state_dict(unwrap_model(model)) if sharded else None
 
     if not rank_zero():
@@ -593,7 +591,10 @@ def train(config: DictConfig) -> None:
             epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
             if dist.is_initialized():
                 dist.barrier()
-            save_model(model, processor, epoch_dir, task, final=False, source_dir=model_cfg.model_path)
+            save_model(
+                model, processor, epoch_dir, task, final=False,
+                source_dir=model_cfg.model_path, sharded=(parallel_mode == "fsdp2"),
+            )
             log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
 
     test_loss = evaluate_epoch(model, processor, test_loader, task, device, temperature, dtype_name)
@@ -610,7 +611,10 @@ def train(config: DictConfig) -> None:
 
     if dist.is_initialized():
         dist.barrier()
-    save_model(model, processor, output_dir, task, source_dir=model_cfg.model_path)
+    save_model(
+        model, processor, output_dir, task,
+        source_dir=model_cfg.model_path, sharded=(parallel_mode == "fsdp2"),
+    )
     if rank_zero():
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
             json.dump(
