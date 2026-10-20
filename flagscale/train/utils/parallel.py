@@ -44,7 +44,7 @@ Checkpointing
 from __future__ import annotations
 
 import contextlib
-from typing import Iterator
+from typing import Any, Iterator
 
 import torch
 from torch import nn
@@ -174,11 +174,12 @@ def gradient_sync_disabled(model: nn.Module) -> Iterator[None]:
 
 
 def full_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
-    """Gather a full (unsharded) state dict.  Collective: all ranks must call.
+    """Gather a full (unsharded) state dict of plain CPU tensors.
 
-    For a non-sharded model this is just ``model.state_dict()``; for FSDP2 it
-    all-gathers the DTensors into plain CPU tensors so the caller can write a
-    normal ``save_pretrained`` checkpoint.
+    Collective: all ranks must call this.  ``StateDictOptions`` asks for a full
+    state, but with composable FSDP2 the values can still be DTensors, whose
+    local shard has been materialised into a wrapper without a usable storage
+    pointer; ``safetensors`` needs a real one, so unwrap to ``to_local()``.
     """
 
     from torch.distributed.checkpoint.state_dict import (
@@ -187,7 +188,22 @@ def full_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
     )
 
     options = StateDictOptions(full_state_dict=True, cpu_offload=True)
-    return get_model_state_dict(model, options=options)
+    gathered = get_model_state_dict(model, options=options)
+    return {k: _as_plain_tensor(v) for k, v in gathered.items()}
+
+
+def _as_plain_tensor(value: Any) -> Any:
+    """Unwrap a DTensor (or nested container of them) into plain tensors."""
+
+    to_local = getattr(value, "to_local", None)
+    if callable(to_local):
+        local = to_local()
+        return local.detach().clone() if torch.is_tensor(local) else local
+    if isinstance(value, dict):
+        return {k: _as_plain_tensor(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_as_plain_tensor(v) for v in value)
+    return value
 
 
 def full_optimizer_state_dict(model: nn.Module, optimizer: torch.optim.Optimizer) -> dict:
