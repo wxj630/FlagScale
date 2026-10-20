@@ -44,7 +44,16 @@ data:
   max_samples: null
 
 optimizer:
-  name: adafactor
+  # AdamW, not Adafactor.  Adafactor existed to fit 8B full fine-tuning on one
+  # 80GB card: its factored second moment is O(rows+cols) instead of two full
+  # fp32 moments.  Two things changed that:
+  #   * FSDP2 shards the optimizer state across ranks, which removes the memory
+  #     pressure Adafactor was bought for;
+  #   * Adafactor's update calls torch.norm(grad, dim=-2).square_() in place,
+  #     and DTensor rejects that on a _NormPartial gradient under FSDP2.
+  # AdamW also keeps its moments in fp32 alongside the fp32 master weights,
+  # which is the point of train.master_dtype=fp32.
+  name: adamw
   lr: 1.0e-5
   weight_decay: 0.01
   max_grad_norm: 1.0
