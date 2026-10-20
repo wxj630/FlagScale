@@ -193,12 +193,22 @@ def full_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _as_plain_tensor(value: Any) -> Any:
-    """Unwrap a DTensor (or nested container of them) into plain tensors."""
+    """Unwrap a DTensor (or nested container of them) into plain CPU tensors.
+
+    ``to_local()`` on an offloaded DTensor can hand back a view whose storage is
+    already released, which ``safetensors`` rejects when it asks for the data
+    pointer.  Materialise a fresh contiguous CPU copy rather than relying on the
+    wrapper's storage.
+    """
 
     to_local = getattr(value, "to_local", None)
     if callable(to_local):
         local = to_local()
-        return local.detach().clone() if torch.is_tensor(local) else local
+        if torch.is_tensor(local):
+            return local.detach().to("cpu").contiguous().clone()
+        return _as_plain_tensor(local)
+    if torch.is_tensor(value):
+        return value.detach().to("cpu").contiguous().clone()
     if isinstance(value, dict):
         return {k: _as_plain_tensor(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
