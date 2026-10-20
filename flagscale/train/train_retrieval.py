@@ -299,12 +299,27 @@ def reduce_metrics(total_loss: float, count: int, device: torch.device) -> float
     return float(values[0].item() / max(values[1].item(), 1.0))
 
 
-def build_optimizer(optim_cfg: DictConfig, parameters: list[nn.Parameter]) -> torch.optim.Optimizer:
-    """Create the configured optimizer for a model's trainable parameters."""
+def build_optimizer(
+    optim_cfg: DictConfig,
+    parameters: list[nn.Parameter],
+    allow_adafactor: bool = True,
+) -> torch.optim.Optimizer:
+    """Create the configured optimizer for a model's trainable parameters.
+
+    ``allow_adafactor=False`` substitutes AdamW when the config asks for
+    Adafactor.  FSDP2 needs that: Adafactor's factored update does
+    ``torch.norm(grad, dim=-2).square_()`` in place, and DTensor rejects an
+    in-place op that would move a ``_NormPartial`` placement to ``Replicate``.
+    Sharding is what freed the memory Adafactor was saving, so AdamW is both
+    the working and the more accurate choice there.
+    """
 
     name = str(optim_cfg.get("name", "adamw")).lower()
     lr = float(optim_cfg.lr)
     weight_decay = float(optim_cfg.get("weight_decay", 0.01))
+    if name == "adafactor" and not allow_adafactor:
+        log("optimizer 'adafactor' is incompatible with FSDP2 DTensor sharding; using AdamW")
+        name = "adamw"
     if name == "adamw":
         return torch.optim.AdamW(parameters, lr=lr, weight_decay=weight_decay)
     if name == "adafactor":
@@ -528,7 +543,9 @@ def train(config: DictConfig) -> None:
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable:
         raise RuntimeError("No trainable parameters remain; set model.freeze_backbone=false")
-    optimizer = build_optimizer(optim_cfg, trainable)
+    optimizer = build_optimizer(
+        optim_cfg, trainable, allow_adafactor=(parallel_mode != "fsdp2")
+    )
     epochs = int(train_cfg.get("epochs", 3))
     if epochs < 1:
         raise ValueError("train.epochs must be at least 1")
