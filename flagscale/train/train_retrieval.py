@@ -539,7 +539,19 @@ def train(config: DictConfig) -> None:
             device_ids=[device.index]
             if platform is not None and platform.name() == "cuda"
             else None,
-            find_unused_parameters=False,
+            # The adapters hold no buffers that need cross-rank synchronisation
+            # (pooling is computed from the input mask), and the default
+            # broadcast_buffers=True rewrites the tokenizer's input tensors in
+            # place after every forward. Those are the same tensors the loss
+            # reuses across the anchor/positive/negative passes, so the backward
+            # of aten::embedding then fails with "modified by an inplace
+            # operation ... expected version 5". Observed on the P800 vendor
+            # torch; harmless to disable here either way.
+            broadcast_buffers=False,
+            # Poolers and the LM head are unused depending on the task/pooling
+            # mode (bge-m3 uses CLS pooling and never touches `pooler`), which
+            # DDP otherwise rejects when the reduction set changes shape.
+            find_unused_parameters=True,
         )
     log(f"parallelism={parallel_mode} master_dtype={master_dtype_name} compute_dtype={dtype_name}")
 
