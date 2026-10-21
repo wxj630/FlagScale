@@ -116,6 +116,28 @@ def _mrr(ranks: list[int]) -> float:
 
 
 @torch.no_grad()
+def _clip_features(backbone, kind: str, inputs: dict) -> torch.Tensor:
+    """Text or image features as a tensor, across Transformers versions.
+
+    Transformers 4.x returns a bare tensor from ``get_text_features`` /
+    ``get_image_features``; 5.x returns a ``BaseModelOutputWithPooling``.
+    Accept both instead of pinning a version.
+    """
+
+    getter = backbone.get_text_features if kind == "text" else backbone.get_image_features
+    features = getter(**inputs)
+    if torch.is_tensor(features):
+        return features
+    for attribute in ("pooler_output", f"{kind}_embeds"):
+        candidate = getattr(features, attribute, None)
+        if torch.is_tensor(candidate):
+            return candidate
+    raise RuntimeError(
+        f"{type(features).__name__} from get_{kind}_features has no usable "
+        f"embedding field: {list(features)}"
+    )
+
+
 def _clip_embeddings(model, chunk: list[dict], device) -> tuple[torch.Tensor, torch.Tensor]:
     """Text and image features for a CLIP batch.
 
@@ -131,8 +153,8 @@ def _clip_embeddings(model, chunk: list[dict], device) -> tuple[torch.Tensor, to
     images = [row["image"] for row in chunk]
     text_inputs = move_features(processor(text=texts, return_tensors="pt", padding=True, truncation=True), device)
     image_inputs = move_features(processor(images=images, return_tensors="pt"), device)
-    text_emb = F.normalize(backbone.get_text_features(**text_inputs).float(), p=2, dim=-1)
-    image_emb = F.normalize(backbone.get_image_features(**image_inputs).float(), p=2, dim=-1)
+    text_emb = F.normalize(_clip_features(backbone, "text", text_inputs).float(), p=2, dim=-1)
+    image_emb = F.normalize(_clip_features(backbone, "image", image_inputs).float(), p=2, dim=-1)
     return text_emb, image_emb
 
 
