@@ -204,6 +204,63 @@ def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tupl
     }
 
 
+@torch.no_grad()
+def evaluate_in_batch_streaming(
+    model,
+    dataset,
+    device,
+    batch_size: int,
+    ks: tuple[int, ...],
+    task: str = "",
+    row_chunk: int = 1024,
+) -> dict:
+    """Full-set image/text retrieval, encoding straight from the stream.
+
+    Same protocol as :func:`evaluate_in_batch` (rank every text against every
+    image of the evaluation set) but it never holds more than one batch of
+    decoded images in host memory -- materialising 5000 PIL images costs
+    5-15 GB and is what got the process OOM-killed on the P800 host.
+    """
+
+    import itertools
+
+    text_embeddings: list[torch.Tensor] = []
+    image_embeddings: list[torch.Tensor] = []
+    count = 0
+    stream = iter(dataset)
+    while True:
+        chunk = list(itertools.islice(stream, batch_size))
+        if not chunk:
+            break
+        if task == "clip":
+            text_emb, image_emb = _clip_embeddings(model, chunk, device)
+        else:
+            text_inputs = [{"text": row["text"]} for row in chunk]
+            image_inputs = [{"image": row["image"]} for row in chunk]
+            text_emb = embedding_batch(model, text_inputs, device)
+            image_emb = embedding_batch(model, image_inputs, device)
+        text_embeddings.append(text_emb.float().cpu())
+        image_embeddings.append(image_emb.float().cpu())
+        count += len(chunk)
+        del chunk
+        if count % (batch_size * 10) == 0:
+            print(f"  [encode] {count} rows", flush=True)
+
+    if not text_embeddings:
+        raise RuntimeError("Evaluation dataset produced no rows")
+    text_all = torch.cat(text_embeddings, dim=0)
+    image_all = torch.cat(image_embeddings, dim=0)
+    print(f"  [encode] done: {text_all.shape[0]} texts x {image_all.shape[0]} images", flush=True)
+
+    text_ranks, image_ranks = _full_retrieval_ranks(text_all, image_all, device, row_chunk)
+    result = {
+        "text_to_image": rank_metrics(text_ranks, ks),
+        "image_to_text": rank_metrics(image_ranks, ks),
+        "samples": int(text_all.shape[0]),
+    }
+    return result
+
+
 def _full_retrieval_ranks(
     text_all: torch.Tensor,
     image_all: torch.Tensor,
@@ -310,24 +367,44 @@ def main() -> None:
         }
     )
     dataset = build_dataset(args.task, data_cfg, args.data_path, args.split, args.max_samples)
+
+    if args.task in {"clip", "vl_embedding"}:
+        # Stream instead of materialising every row: each row holds a decoded PIL
+        # image (megabytes each), so list()-ing the 5000-image MSCOCO split costs
+        # 5-15 GB of host RAM and gets the process OOM-killed on a busy host.
+        # Only the embeddings need to persist.
+        metrics = evaluate_in_batch_streaming(
+            model, dataset, device, args.batch_size, (1, 5, 10), args.task
+        )
+        result = {
+            "model_type": args.model_type,
+            "task": args.task,
+            "checkpoint": model_path,
+            "split": args.split,
+            "samples": metrics.pop("samples"),
+            "metrics": metrics,
+        }
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        if args.output:
+            with open(args.output, "w", encoding="utf-8") as file:
+                json.dump(result, file, indent=2)
+        return
+
     rows = list(dataset)
     if not rows:
         raise RuntimeError(f"No rows for split {args.split!r} in {args.data_path}")
 
-    if args.task in {"clip", "vl_embedding"}:
-        metrics = evaluate_in_batch(model, rows, device, args.batch_size, (1, 5, 10), args.task)
-    else:
-        negative_keys = [f"negative_{i}" for i in range(1, args.num_negatives + 1)
-                         if f"negative_{i}" in rows[0]]
-        # Rank by length before batching. Every query's candidate set stays in
-        # one batch, so ordering by length cannot change any query's result, but
-        # it stops a single long row from padding a whole batch to the max: with
-        # random order each 192-sequence batch padded to 640 tokens, after
-        # sorting the batch max tracks the local length instead.
-        rows.sort(key=lambda row: len(row.get("anchor", "")) + len(row.get("positive", "")))
-        ranks = evaluate_ranked(model, rows, args.task, device, args.batch_size, negative_keys)
-        metrics = rank_metrics(ranks, (1, 5, 10))
-        metrics["num_negatives"] = len(negative_keys)
+    negative_keys = [f"negative_{i}" for i in range(1, args.num_negatives + 1)
+                     if f"negative_{i}" in rows[0]]
+    # Rank by length before batching. Every query's candidate set stays in
+    # one batch, so ordering by length cannot change any query's result, but
+    # it stops a single long row from padding a whole batch to the max: with
+    # random order each 192-sequence batch padded to 640 tokens, after
+    # sorting the batch max tracks the local length instead.
+    rows.sort(key=lambda row: len(row.get("anchor", "")) + len(row.get("positive", "")))
+    ranks = evaluate_ranked(model, rows, args.task, device, args.batch_size, negative_keys)
+    metrics = rank_metrics(ranks, (1, 5, 10))
+    metrics["num_negatives"] = len(negative_keys)
 
     result = {
         "model_type": args.model_type,
