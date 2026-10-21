@@ -160,11 +160,23 @@ def _clip_embeddings(model, chunk: list[dict], device) -> tuple[torch.Tensor, to
 
 @torch.no_grad()
 def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tuple[int, ...], task: str = ""):
-    """Symmetric in-batch image/text retrieval (CLIP / VL embedding)."""
+    """Symmetric image/text retrieval over the **whole** evaluation set.
 
-    text_ranks: list[int] = []
-    image_ranks: list[int] = []
+    The name is historical: an earlier version scored each batch in isolation,
+    which made the candidate pool the batch size (64) instead of the full test
+    set (5000). That inflates recall by two orders of magnitude -- the random
+    baseline moves from 1/5000 to 1/64 -- and makes results depend on the batch
+    size, so they could not be compared with published MSCOCO numbers.
+
+    The protocol now matches the standard CLIP evaluation: encode every image
+    and every text once, build the full N x N similarity matrix, and rank each
+    text against all images (and vice versa). Memory for N=5000 is ~100 MB per
+    direction at fp32, so this is affordable.
+    """
+
     total = len(rows)
+    text_embeddings: list[torch.Tensor] = []
+    image_embeddings: list[torch.Tensor] = []
     for index, chunk in enumerate(_batched(rows, batch_size)):
         if task == "clip":
             text_emb, image_emb = _clip_embeddings(model, chunk, device)
@@ -173,22 +185,59 @@ def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tupl
             image_inputs = [{"image": row["image"]} for row in chunk]
             text_emb = embedding_batch(model, text_inputs, device)
             image_emb = embedding_batch(model, image_inputs, device)
-        sim = text_emb @ image_emb.T
-        labels = torch.arange(sim.shape[0], device=sim.device)
-        text_ranks.extend((1 + (sim > sim[labels, labels].unsqueeze(1)).sum(dim=1)).tolist())
-        sim_t = sim.T
-        image_ranks.extend((1 + (sim_t > sim_t[labels, labels].unsqueeze(1)).sum(dim=1)).tolist())
+        text_embeddings.append(text_emb.float().cpu())
+        image_embeddings.append(image_emb.float().cpu())
         if (index + 1) % 20 == 0:
-            done = len(text_ranks)
-            print(
-                f"  [progress] {done}/{total} samples ({done / total * 100:.1f}%) "
-                f"t2i_mrr={_mrr(text_ranks):.4f} i2t_mrr={_mrr(image_ranks):.4f}",
-                flush=True,
-            )
+            done = min((index + 1) * batch_size, total)
+            print(f"  [encode] {done}/{total} ({done / total * 100:.1f}%)", flush=True)
+
+    text_all = torch.cat(text_embeddings, dim=0)      # (N, D)
+    image_all = torch.cat(image_embeddings, dim=0)    # (N, D)
+    print(f"  [encode] done: {text_all.shape[0]} texts x {image_all.shape[0]} images", flush=True)
+
+    # Full N x N similarity, computed on the accelerator in row chunks so the
+    # matrix itself does not have to live there in one piece.
+    text_ranks, image_ranks = _full_retrieval_ranks(text_all, image_all, device)
     return {
         "text_to_image": rank_metrics(text_ranks, ks),
         "image_to_text": rank_metrics(image_ranks, ks),
     }
+
+
+def _full_retrieval_ranks(
+    text_all: torch.Tensor,
+    image_all: torch.Tensor,
+    device: torch.device,
+    row_chunk: int = 1024,
+) -> tuple[list[int], list[int]]:
+    """Ranks for text->image and image->text against the full candidate pool.
+
+    Row-chunked so peak device memory is ``row_chunk * N`` floats (~20 MB for
+    N=5000, chunk=1024) rather than the whole matrix.
+    """
+
+    n = text_all.shape[0]
+    # The diagonal is the paired caption/image; the rank counts how many other
+    # candidates score strictly higher, so ties do not inflate the rank.
+    text_ranks: list[int] = []
+    for start in range(0, n, row_chunk):
+        block = text_all[start : start + row_chunk].to(device)
+        sim = block @ image_all.to(device).T                      # (chunk, N)
+        paired = sim[torch.arange(block.shape[0], device=device), torch.arange(start, start + block.shape[0], device=device)]
+        better = (sim > paired.unsqueeze(1)).sum(dim=1)
+        text_ranks.extend((better + 1).tolist())
+        del sim, paired, better
+
+    image_ranks: list[int] = []
+    for start in range(0, n, row_chunk):
+        block = image_all[start : start + row_chunk].to(device)
+        sim = block @ text_all.to(device).T
+        paired = sim[torch.arange(block.shape[0], device=device), torch.arange(start, start + block.shape[0], device=device)]
+        better = (sim > paired.unsqueeze(1)).sum(dim=1)
+        image_ranks.extend((better + 1).tolist())
+        del sim, paired, better
+
+    return text_ranks, image_ranks
 
 
 def main() -> None:
