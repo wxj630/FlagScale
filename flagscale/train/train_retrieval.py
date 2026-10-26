@@ -386,6 +386,67 @@ def build_optimizer(
     raise ValueError(f"Unsupported optimizer {name!r}; use 'adamw' or 'adafactor'")
 
 
+def build_lr_scheduler(
+    optim_cfg: DictConfig,
+    optimizer: torch.optim.Optimizer,
+    total_steps: int | None = None,
+) -> tuple[Any, int, dict[str, Any]]:
+    """Create the configured LR schedule.
+
+    A schedule is not optional. Without one the optimizer keeps ``lr`` for every
+    step of every epoch; a 3-epoch 8B reranker run at a constant 1e-5 ended at
+    train_loss 0.042 against validation_loss 0.377 (9x) and lost 1.5 points of
+    R@5 to the base model. The earlier long run on the other platform fared
+    worse: it peaked at eval loss 0.327 near step 6k and then diverged to 10-40
+    with accuracy pinned at 0.5, again with a constant rate.
+
+    Returns the scheduler, the number of warmup steps (0 when disabled) and a
+    mutable state dict.  The retrieval datasets are streaming, so the number of
+    optimizer steps in an epoch is only known after one has run; the caller
+    updates ``state["total_steps"]`` at the first epoch boundary and the
+    schedule re-anchors itself.  Passing ``total_steps`` explicitly (config
+    ``train.lr_decay_steps``) skips that correction.
+    """
+
+    style = str(optim_cfg.get("lr_decay_style", "cosine")).lower()
+    warmup_steps = int(optim_cfg.get("warmup_steps", 0) or 0)
+    min_lr = float(optim_cfg.get("min_lr", 0.0) or 0.0)
+    base_lr = float(optim_cfg.lr)
+    total_steps = max(1, int(total_steps)) if total_steps else 1
+    warmup_steps = min(max(0, warmup_steps), max(1, total_steps - 1))
+    # ``total_steps`` starts as a placeholder when the caller cannot know it; the
+    # lambdas read it from this dict on every step, so updating one key is enough.
+    state: dict[str, Any] = {"total_steps": total_steps, "known": bool(total_steps)}
+
+    if min_lr > base_lr:
+        raise ValueError(f"optimizer.min_lr ({min_lr}) must be <= optimizer.lr ({base_lr})")
+
+    import math
+
+    floor = (min_lr / base_lr) if base_lr else 0.0
+
+    def factor(step: int) -> float:
+        if warmup_steps and step < warmup_steps:
+            return (step + 1) / warmup_steps
+        if style == "constant":
+            return 1.0
+        total = max(1, int(state["total_steps"]))
+        decay_steps = max(1, total - warmup_steps)
+        progress = min(1.0, (step - warmup_steps) / decay_steps)
+        if style == "linear":
+            return 1.0 - (1.0 - floor) * progress
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return floor + (1.0 - floor) * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+    log(
+        f"lr schedule: {style} {base_lr:g} -> {min_lr:g} "
+        f"(total_steps={'configured' if state['known'] else 'estimated after epoch 1'}), "
+        f"warmup {warmup_steps} steps"
+    )
+    return scheduler, warmup_steps, state
+
+
 def train_epoch(
     model: nn.Module,
     processor: Any,
@@ -402,6 +463,8 @@ def train_epoch(
     log_every: int,
     wandb_run: Any = None,
     step_state: dict[str, int] | None = None,
+    lr_scheduler: Any = None,
+    warmup_steps: int = 0,
 ) -> float:
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -448,6 +511,10 @@ def train_epoch(
             torch.nn.utils.clip_grad_norm_(trainable, max_grad_norm)
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+        if lr_scheduler is not None:
+            # The warmup lambdas already encode the ramp, so every step advances
+            # the scheduler -- including the ones inside warmup.
+            lr_scheduler.step()
         optimizer_steps += 1
         if step_state is not None:
             step_state["optimizer_step"] = step_state.get("optimizer_step", 0) + 1
@@ -462,16 +529,22 @@ def train_epoch(
             # epoch.  A cumulative average hides the trend and makes the curve
             # look like it plateaus even while batches keep changing.
             window_average = window_loss / max(window_batches, 1)
+            current_lr = optimizer.param_groups[0].get("lr")
             log(
                 f"epoch={epoch} optimizer_step={optimizer_steps} "
                 f"running_loss={total_loss / micro_batches:.6f} "
-                f"window_loss={window_average:.6f}"
+                f"window_loss={window_average:.6f} "
+                # Printing lr makes a missing or frozen schedule visible; a
+                # constant lr across a multi-epoch run is the failure this line
+                # exists to catch.
+                f"lr={float(current_lr):.3e}"
             )
             if wandb_run is not None:
                 wandb_run.log(
                     {
                         "train/step_loss": window_average,
                         "train/epoch_running_loss": total_loss / micro_batches,
+                        "train/lr": float(optimizer.param_groups[0].get("lr", 0.0)),
                         "train/optimizer_step": global_step,
                         "epoch": epoch,
                     }
@@ -566,6 +639,9 @@ def train(config: DictConfig) -> None:
         data_cfg,
         int(train_cfg.batch_size),
         pin_memory=bool(platform and platform.supports_pin_memory()),
+        # Seed the train loader's sampler and workers from the same base seed so
+        # a rerun with num_workers > 0 reproduces the batch order.
+        seed=seed + rank,
     )
 
     dtype_name = str(model_cfg.get("torch_dtype", "bf16"))
@@ -626,6 +702,9 @@ def train(config: DictConfig) -> None:
     epochs = int(train_cfg.get("epochs", 3))
     if epochs < 1:
         raise ValueError("train.epochs must be at least 1")
+    lr_scheduler, warmup_steps, lr_sched_state = build_lr_scheduler(
+        optim_cfg, optimizer, total_steps=optim_cfg.get("lr_decay_steps") or None
+    )
     save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
     grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
     temperature = float(train_cfg.get("temperature", 0.05))
@@ -642,7 +721,22 @@ def train(config: DictConfig) -> None:
             model, processor, train_loader, epoch, task, device, temperature, optimizer,
             trainable, grad_accum, clip_grad, dtype_name, log_every,
             wandb_run=wandb_run, step_state=wandb_step,
+            lr_scheduler=lr_scheduler, warmup_steps=warmup_steps,
         )
+        # Re-anchor the schedule once the real epoch length is known. Without
+        # this a streaming dataset would decay against a placeholder total, so
+        # the cosine would either finish early or never reach min_lr.
+        if not lr_sched_state["known"] and epoch == 1:
+            # wandb_step is always allocated and counts optimizer steps, so it
+            # also tells us how long the first epoch actually was.
+            steps_done = int(wandb_step["optimizer_step"])
+            lr_sched_state["total_steps"] = max(1, steps_done * epochs)
+            lr_sched_state["known"] = True
+            if rank_zero():
+                log(
+                    f"lr schedule re-anchored: {steps_done} steps/epoch -> "
+                    f"total {lr_sched_state['total_steps']} for {epochs} epochs"
+                )
         validation_loss = evaluate_epoch(
             model, processor, validation_loader, task, device, temperature, dtype_name
         )

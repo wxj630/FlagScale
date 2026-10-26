@@ -56,5 +56,14 @@ optimizer:
   # which is the point of train.master_dtype=fp32.
   name: adamw
   lr: 1.0e-5
+  # The rate has to come down over the run. With a constant 1e-5 for the whole
+  # 3-epoch fine-tune, the A100 run ended at train_loss 0.042 vs
+  # validation_loss 0.377 (9x) and lost 1.5 R@5 points against the base model.
+  # `lr_decay_steps` is optional: the datasets are streaming, so when it is
+  # omitted the schedule re-anchors after epoch 1 using the measured epoch
+  # length.
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 200
   weight_decay: 0.01
   max_grad_norm: 1.0

@@ -61,6 +61,17 @@ train:
   # `model.torch_dtype` through autocast (and FSDP2's MixedPrecisionPolicy).
   master_dtype: ${oc.env:FLAGSCALE_MASTER_DTYPE,bf16}
 
+  # Reproducibility. `seed` (defined per model under conf/train/*.yaml) seeds
+  # python/numpy/torch, the device RNG, the train loader's sampler and its
+  # workers; the per-rank seed is `seed + rank`. Exact replay also needs the
+  # same torch version, worker count and batch size -- those are recorded in the
+  # checkpoint's metrics.json under "reproducibility" and "config".
+  #
+  # `deterministic` additionally disables non-deterministic kernels. It stays
+  # off by default because several vendor runtimes only implement the
+  # non-deterministic path; turn it on for CPU/CUDA comparisons.
+  deterministic: ${oc.env:FLAGSCALE_DETERMINISTIC,false}
+
   hardware:
     # `cuda` is the validated path on this host. `flagos` activates torch-fl's
     # PrivateUse1 device and requires a matching vendor environment.

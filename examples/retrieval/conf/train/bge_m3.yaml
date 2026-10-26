@@ -33,4 +33,10 @@ data:
 optimizer:
   lr: 2.0e-5
   weight_decay: 0.01
+  # Constant-lr fine-tuning over multiple epochs overfits: see the reranker
+  # config for the measured 9x train/validation gap. `lr_decay_steps` is
+  # optional; without it the schedule re-anchors after epoch 1.
+  lr_decay_style: cosine
+  min_lr: 2.0e-6
+  warmup_steps: 200
   max_grad_norm: 1.0
