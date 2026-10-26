@@ -62,6 +62,49 @@ def _is_block_list(module: nn.Module) -> bool:
     return isinstance(module, (nn.ModuleList, nn.Sequential)) and len(module) > 1
 
 
+def iter_large_leaf_modules(
+    module: nn.Module, min_bytes: int, gather_dtype: torch.dtype = torch.bfloat16
+) -> Iterator[nn.Module]:
+    """Yield leaf modules holding at least ``min_bytes`` of their own parameters.
+
+    FSDP2 gathers a param group's parameters into one contiguous buffer, so a
+    group that still contains giant embeddings needs a giant allocation.  On
+    Qwen3-8B the root group is ``embed_tokens`` (151669x4096) plus ``lm_head``,
+    which is 2.31 GiB in bf16 -- P800 fails that single allocation during the
+    pre-backward all-gather even with 28 GiB of device memory free, because by
+    then the free memory is scattered across segments.  Sharding these modules
+    on their own halves the largest request so the allocator can satisfy it
+    from a fragment it already has.
+
+    Modules with shared (tied) parameters are skipped: sharding them separately
+    would break the tie.
+    """
+
+    block_ids = {id(block) for block in iter_transformer_blocks(module)}
+
+    ref_count: dict[int, int] = {}
+    for p in module.parameters():
+        ref_count[id(p)] = ref_count.get(id(p), 0) + 1
+
+    def visit(current: nn.Module) -> Iterator[nn.Module]:
+        for child in current.children():
+            if id(child) in block_ids:
+                continue
+            own = list(child.parameters(recurse=False))
+            has_nested = any(True for c in child.children() if any(True for _ in c.parameters()))
+            if own and not has_nested:
+                # The gathered buffer is in the compute dtype, not the master
+                # dtype the weights are stored in.
+                size = sum(p.numel() for p in own) * gather_dtype.itemsize
+                tied = any(ref_count.get(id(p), 0) > 1 for p in own)
+                if size >= min_bytes and not tied:
+                    yield child
+            else:
+                yield from visit(child)
+
+    yield from visit(module)
+
+
 def fsdp2_available() -> bool:
     """Whether the installed torch exposes composable FSDP2."""
     try:
@@ -105,6 +148,7 @@ def apply_fsdp2(
     compute_dtype: torch.dtype = torch.bfloat16,
     reduce_dtype: torch.dtype = torch.bfloat16,
     reshard_after_forward: bool = True,
+    max_group_bytes: int = 1 << 30,
     log=lambda msg: None,
 ) -> nn.Module:
     """Shard ``model`` in place with FSDP2 and return it.
@@ -115,6 +159,13 @@ def apply_fsdp2(
     all-gather), but that keeps *every* block's parameters resident at once --
     for an 8B model in fp32 that alone is ~30 GB per rank and overruns a 80 GB
     card. True costs one extra all-gather per block and fits.
+
+    ``max_group_bytes`` caps how much bf16 weight one param group may gather at
+    once.  Transformer blocks come in well under it, but a root group holding
+    the token embedding and the output projection does not, and the resulting
+    multi-gigabyte single allocation is what P800's allocator cannot satisfy
+    once the free memory has fragmented.  Oversized leaf modules therefore get
+    their own group, which halves the peak request.
     """
 
     from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
@@ -134,6 +185,20 @@ def apply_fsdp2(
             mp_policy=mp_policy,
             reshard_after_forward=reshard_after_forward,
         )
+    large_leaves = list(iter_large_leaf_modules(model, max_group_bytes, compute_dtype))
+    names = {id(m): n for n, m in model.named_modules()}
+    for leaf in large_leaves:
+        nbytes = sum(p.numel() for p in leaf.parameters(recurse=False)) * compute_dtype.itemsize
+        log(
+            f"  oversized leaf: {names.get(id(leaf), '<unnamed>')} "
+            f"gathers {nbytes / 2**20:.0f} MiB in {compute_dtype}"
+        )
+        fully_shard(
+            leaf,
+            mesh=mesh,
+            mp_policy=mp_policy,
+            reshard_after_forward=reshard_after_forward,
+        )
     fully_shard(
         model,
         mesh=mesh,
@@ -141,9 +206,10 @@ def apply_fsdp2(
         reshard_after_forward=reshard_after_forward,
     )
     log(
-        f"FSDP2 sharded {len(blocks)} transformer blocks + root over "
-        f"{world_size} rank(s); compute dtype {compute_dtype}, "
-        f"reduce dtype {reduce_dtype}"
+        f"FSDP2 sharded {len(blocks)} transformer blocks, {len(large_leaves)} "
+        f"oversized leaf module(s) and the root over {world_size} rank(s); "
+        f"compute dtype {compute_dtype}, reduce dtype {reduce_dtype}, "
+        f"max param group {max_group_bytes / 2**20:.0f} MiB"
     )
     return model
 
