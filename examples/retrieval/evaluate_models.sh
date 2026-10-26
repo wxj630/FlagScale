@@ -26,6 +26,9 @@
 #   MAX_SAMPLES   cap queries/images per run (default: whole split)
 #   BATCH_SIZE    override every model's batch (default: per-model below)
 #   WAIT_FOR_IDLE set to 1 to block until the device is free (default: 0)
+#   SAVE_PREDICTIONS 1 to also write per-query scores/ranks (default: 1)
+#                    They are what a later metric needs; without them a cutoff
+#                    change means re-running the model for hours.
 #   RUN_ROOT      where fine-tuned checkpoints live
 set -Eeuo pipefail
 
@@ -42,6 +45,7 @@ TAGS="${TAGS:-base trained}"
 NUM_NEGATIVES="${NUM_NEGATIVES:-15}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 WAIT_FOR_IDLE="${WAIT_FOR_IDLE:-0}"
+SAVE_PREDICTIONS="${SAVE_PREDICTIONS:-1}"
 CONF_DIR="examples/retrieval/conf/train"
 
 export FLAGSCALE_DEVICE=flagos
@@ -127,6 +131,12 @@ for model in $MODELS; do
       --device flagos
       --output "${EVAL_DIR}/${model}_${split}_${tag}.json"
     )
+    # Per-query scores, so a new cutoff or metric does not require another pass.
+    # The rank files are large for 17k queries x 15 negatives; they are the only
+    # record of what the model actually scored.
+    if [ "$SAVE_PREDICTIONS" = "1" ]; then
+      args+=(--save-predictions)
+    fi
     if [ -n "$MAX_SAMPLES" ]; then
       args+=(--max-samples "$MAX_SAMPLES")
     fi

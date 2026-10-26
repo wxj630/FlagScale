@@ -70,9 +70,16 @@ def _batched(items: list, batch_size: int):
 
 @torch.no_grad()
 def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int, negative_keys: list[str]):
-    """Rank each query's positive against its hard negatives."""
+    """Rank each query's positive against its hard negatives.
+
+    Returns ``(ranks, predictions)``. ``predictions`` keeps the per-query score
+    vector so a new metric can be computed later without re-running the model:
+    a full 8B pass over 17k queries takes hours, and the scores are the only
+    thing that cannot be cheaply recomputed.
+    """
 
     ranks: list[int] = []
+    predictions: list[dict] = []
     total = len(rows)
     for index, chunk in enumerate(_batched(rows, batch_size)):
         anchors = [row["anchor"] for row in chunk]
@@ -86,10 +93,24 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
                 groups.append(len(docs))
             scores = reranker_batch(model, pair_lists, device)
             offset = 0
-            for size in groups:
+            for row_index, size in enumerate(groups):
                 block = scores[offset : offset + size]
                 offset += size
+                row = chunk[row_index]
                 ranks.append(1 + int((block > block[0]).sum().item()))
+                predictions.append(
+                    {
+                        "anchor": row["anchor"],
+                        # Ground truth is always candidate 0 (the positive), so
+                        # it is recorded as an index rather than by repeating the
+                        # passage text.
+                        "ground_truth": 0,
+                        "candidates": [row["positive"]]
+                        + [row[key] for key in negative_keys],
+                        "scores": [round(float(v), 6) for v in block.tolist()],
+                        "rank": ranks[-1],
+                    }
+                )
         else:
             anchor_emb = embedding_batch(model, anchors, device)
             candidate_blocks = []
@@ -98,7 +119,21 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
             candidates = torch.stack(candidate_blocks, dim=1)  # (B, 1+K, D)
             scores = torch.einsum("bd,bkd->bk", anchor_emb, candidates)
             positive = scores[:, :1]
-            ranks.extend((1 + (scores > positive).sum(dim=1)).tolist())
+            block_ranks = (1 + (scores > positive).sum(dim=1)).tolist()
+            ranks.extend(block_ranks)
+            for row_index, row in enumerate(chunk):
+                predictions.append(
+                    {
+                        "anchor": row["anchor"],
+                        "ground_truth": 0,
+                        "candidates": [row["positive"]]
+                        + [row[key] for key in negative_keys],
+                        "scores": [
+                            round(float(v), 6) for v in scores[row_index].tolist()
+                        ],
+                        "rank": block_ranks[row_index],
+                    }
+                )
         # Full test splits take hours on the 8B models, so report progress
         # instead of leaving the caller blind until the final JSON.
         if (index + 1) % 50 == 0:
@@ -108,7 +143,7 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
                 f"({done / total * 100:.1f}%) running_mrr={_mrr(ranks):.4f}",
                 flush=True,
             )
-    return ranks
+    return ranks, predictions
 
 
 def _mrr(ranks: list[int]) -> float:
@@ -314,6 +349,14 @@ def main() -> None:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--output", default=None, help="write metrics JSON here")
     parser.add_argument(
+        "--save-predictions",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="also write per-query scores/rank for later re-scoring. "
+        "'auto' (or no value) puts them next to --output; a path writes them there.",
+    )
+    parser.add_argument(
         "--train-config",
         default=None,
         help="training YAML for this model; its model.* settings (use_score_head, "
@@ -402,7 +445,9 @@ def main() -> None:
     # random order each 192-sequence batch padded to 640 tokens, after
     # sorting the batch max tracks the local length instead.
     rows.sort(key=lambda row: len(row.get("anchor", "")) + len(row.get("positive", "")))
-    ranks = evaluate_ranked(model, rows, args.task, device, args.batch_size, negative_keys)
+    ranks, predictions = evaluate_ranked(
+        model, rows, args.task, device, args.batch_size, negative_keys
+    )
     metrics = rank_metrics(ranks, (1, 5, 10))
     metrics["num_negatives"] = len(negative_keys)
 
@@ -419,6 +464,31 @@ def main() -> None:
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    if args.save_predictions:
+        # One row per query with its full candidate score vector. A new metric
+        # (recall@3, nDCG, per-length buckets) can then be computed from this
+        # file alone: re-running an 8B model over the whole test split just to
+        # change a cutoff costs hours, and the scores are the only part that
+        # cannot be cheaply recomputed.
+        if args.save_predictions == "auto":
+            predictions_path = Path((args.output or "predictions.json") + ".predictions.json")
+        else:
+            predictions_path = Path(args.save_predictions)
+        predictions_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "model_type": args.model_type,
+            "task": args.task,
+            "checkpoint": model_path,
+            "split": args.split,
+            "num_negatives": len(negative_keys),
+            # Candidate index 0 is always the positive, so a scorer can rely on
+            # that instead of having to match passage text.
+            "ground_truth_policy": "index0",
+            "predictions": predictions,
+        }
+        predictions_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        print(f"predictions -> {predictions_path}", flush=True)
 
 
 if __name__ == "__main__":
