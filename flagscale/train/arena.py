@@ -3,7 +3,43 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Single-arena allocator for devices without ``expandable_segments``.
+"""REJECTED: single-arena allocator for devices without ``expandable_segments``.
+
+===========================  DO NOT WIRE THIS UP  ===========================
+This module is kept as the record of a measured dead end, not as working code.
+Every route it takes was tested on P800 and failed. The evidence is in
+``Notes/kunlunxin-alloc-fragmentation.md`` (sections 3.1 and 3.2); the two
+blockers, in short:
+
+1. **MemPool + private engine-thread binding aborts the process at exit.** The
+   binding itself works -- the probe confirms the FSDP2 all-gather buffer does
+   land in the pool. But the pool stays referenced by the autograd engine
+   thread, so ``~MemPool`` trips ``use_count() == 1 INTERNAL ASSERT FAILED``
+   on interpreter shutdown (exit 1/134). Re-binding the same thread also raises
+   ``beginAllocateToPool: already recording to mempool_id``.
+
+2. **Multi-stream defeats the pre-reserve.** PyTorch's caching allocator pools
+   per stream and FSDP2's all-gather uses a dedicated one, so the single 70 GiB
+   segment is replaced by 20 per-stream segments the moment other streams
+   allocate:
+
+       arena reserved+free      segs= 1 total=70.00 free=70.00 largest=70.00
+       after churn (3 streams)  segs=20 total=28.02 free=28.02 largest= 2.31
+
+   Measured end to end: with ``FLAGSCALE_ARENA_GIB=80`` set, the failing
+   allocation moved from 2.31 GiB to 1.16 GiB (the post-shard all-gather size)
+   and still OOM'd.
+
+The ``never release the pool`` trick in :func:`enable` does not fix (1); it only
+defers the abort to process teardown.
+
+What does work today: shard the oversized leaves into their own param group
+(``iter_large_leaf_modules`` in ``utils/parallel.py``), and/or run the reranker
+on 3 cards. The real fix is a pluggable allocator that takes one contiguous
+region via ``cuMemAlloc`` and sub-allocates from it -- NOT implemented.
+============================================================================
+
+Original description follows, for context only.
 
 CUDA's ``expandable_segments`` keeps one virtual address range and maps physical
 pages into it on demand, so a segment can grow and every allocation is carved
@@ -97,12 +133,21 @@ def enable(gib: float | None = None, log=lambda msg: None):
     deliberately never released: the autograd thread stays bound to it for the
     life of the process, and tearing it down would trip ``~MemPool``'s
     ``use_count == 1`` assertion at interpreter shutdown.
+
+    REJECTED -- see the module docstring.  This still aborts at process exit and
+    is still defeated by multiple streams; the warning below exists so nobody
+    wires it up without seeing that.
     """
 
-    if gib is None:
-        gib = requested_gib()
+    gib = requested_gib() if gib is None else gib
     if gib <= 0:
         return None
+    log(
+        "WARNING: FLAGSCALE_ARENA_GIB is set, but the arena route was measured "
+        "dead on P800 -- MemPool aborts at interpreter exit (use_count==1) and "
+        "multi-stream allocation defeats the pre-reserve. See "
+        "Notes/kunlunxin-alloc-fragmentation.md sections 3.1/3.2."
+    )
     if not supported():
         log("arena allocator requested but this torch build lacks MemPool; using the default allocator")
         return None
@@ -131,4 +176,4 @@ def describe() -> str:
         return "arena allocator: disabled"
     if not supported():
         return "arena allocator: requested but unsupported by this torch build"
-    return f"arena allocator: {gib:.1f} GiB single segment requested"
+    return f"arena allocator: {gib:.1f} GiB requested (REJECTED route, see module docstring)"
