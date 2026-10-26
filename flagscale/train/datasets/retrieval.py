@@ -305,20 +305,51 @@ def retrieval_collate(rows: list[dict[str, Any]]) -> dict[str, list[Any]]:
     return {key: [row[key] for row in rows] for key in rows[0]}
 
 
+def _worker_init(worker_id: int) -> None:
+    """Seed each DataLoader worker deterministically.
+
+    Offsets are relative to whatever ``seed_everything`` set in the parent, so a
+    rerun with the same ``train.seed`` reproduces the same per-worker streams.
+    Without this, worker RNG state depends on OS scheduling and a "same seed"
+    rerun diverges as soon as ``num_workers > 0``.
+    """
+
+    import random as _random
+
+    import numpy as _np
+    import torch as _torch
+
+    base = _torch.initial_seed() % (2**32)
+    worker_seed = (base + worker_id * 7919) % (2**32)
+    _random.seed(worker_seed)
+    _np.random.seed(worker_seed)
+    _torch.manual_seed(worker_seed)
+
+
 def make_loader(
     dataset: IterableDataset,
     batch_size: int,
     pin_memory: bool,
     num_workers: int = 0,
+    seed: int | None = None,
 ) -> DataLoader:
     """Create the standard loader for a streaming retrieval dataset.
 
     Workers only see distinct samples because the datasets shard by
     ``(rank, worker_id)``; the persistent-worker flag is left off so each
     epoch re-enters ``__iter__`` and reshuffles.
+
+    ``seed`` fixes the sampler/worker RNG.  Passing it makes ``num_workers > 0``
+    runs repeatable; leaving it ``None`` keeps the previous behaviour.
     """
 
     num_workers = max(0, int(num_workers))
+    generator = None
+    worker_init = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(int(seed) % (2**63 - 1))
+        worker_init = _worker_init
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -326,6 +357,8 @@ def make_loader(
         pin_memory=pin_memory,
         collate_fn=retrieval_collate,
         persistent_workers=False,
+        generator=generator,
+        worker_init_fn=worker_init,
     )
 
 
@@ -378,8 +411,16 @@ def build_split_loaders(
     data_cfg: DictConfig,
     batch_size: int,
     pin_memory: bool,
+    seed: int | None = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Build train, validation and test loaders from the native config."""
+    """Build train, validation and test loaders from the native config.
+
+    ``seed`` is the training seed; it fixes the sampler and worker RNG so a run
+    is repeatable with ``num_workers > 0``.  Evaluation loaders are left
+    unseeded on purpose -- their order is already fixed by the dataset split, and
+    a generator there would change the sample order of an otherwise identical
+    rerun.
+    """
 
     train_path = str(data_cfg.get("train_path", data_cfg.get("path")))
     validation_path = str(data_cfg.get("validation_path", train_path))
@@ -400,7 +441,7 @@ def build_split_loaders(
     # stay bit-for-bit comparable across runs.
     train_workers = int(data_cfg.get("num_workers", 0) or 0)
     loaders = (
-        make_loader(datasets[0], batch_size, pin_memory, train_workers),
+        make_loader(datasets[0], batch_size, pin_memory, train_workers, seed=seed),
         make_loader(datasets[1], batch_size, pin_memory, 0),
         make_loader(datasets[2], batch_size, pin_memory, 0),
     )

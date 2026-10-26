@@ -41,6 +41,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 # torch-fl must claim PyTorch's PrivateUse1 slot before the first flagos tensor
 # is created.  Keep the import opt-in so the CUDA environment has no dependency
 # on a vendor plugin.  The FlagScale config exports FLAGSCALE_DEVICE before
@@ -153,12 +155,64 @@ def finish_distributed() -> None:
         dist.destroy_process_group()
 
 
-def seed_everything(seed: int, rank: int, device: torch.device, platform: Any = None) -> None:
+def seed_everything(
+    seed: int,
+    rank: int,
+    device: torch.device,
+    platform: Any = None,
+    deterministic: bool = False,
+) -> None:
+    """Seed every RNG a retrieval run draws from.
+
+    ``rank`` is folded into the seed so replicas take different augmentation
+    and dropout draws, while the *data* order stays reproducible because the
+    datasets derive their shuffle seed from the same base seed + rank.
+
+    ``deterministic`` additionally pins the algorithms that are otherwise
+    free to pick a faster non-deterministic kernel.  It is off by default: on
+    several vendor runtimes those kernels are the only implemented path, and
+    turning them off raises at launch rather than at the first divergence.
+    """
+
     seed += rank
+    # Python's hash randomisation would otherwise vary set/dict iteration order
+    # between processes; workers inherit this through the environment.
+    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
+    np.random.seed(seed % (2**32))
     torch.manual_seed(seed)
     if platform is not None:
         platform.manual_seed_all(seed)
+    elif torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def reproducibility_record(
+    seed: int,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    platform: Any = None,
+    deterministic: bool = False,
+) -> dict[str, Any]:
+    """Describe what was seeded, so a metrics.json can be matched to a rerun."""
+
+    return {
+        "seed": int(seed),
+        "seed_per_rank": int(seed + rank),
+        "world_size": int(world_size),
+        "device": str(device),
+        "platform": platform.name() if platform is not None else "cuda",
+        "deterministic": bool(deterministic),
+        "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
+        "torch_version": torch.__version__,
+        "numpy_version": np.__version__,
+    }
 
 
 def autocast_context(device: torch.device, dtype_name: str, platform: Any = None):
@@ -471,7 +525,15 @@ def train(config: DictConfig) -> None:
     train_cfg = config.train
     rank, world_size, device, platform = init_distributed(train_cfg.get("hardware", {}))
     task = str(train_cfg.task)
-    seed_everything(int(train_cfg.get("seed", 42)), rank, device, platform)
+    seed = int(train_cfg.get("seed", 42))
+    deterministic = bool(train_cfg.get("deterministic", False))
+    seed_everything(seed, rank, device, platform, deterministic=deterministic)
+    seed_record = reproducibility_record(seed, rank, world_size, device, platform, deterministic)
+    if rank_zero():
+        log(
+            "reproducibility: seed={seed} per_rank={seed_per_rank} deterministic={deterministic} "
+            "world_size={world_size} platform={platform}".format(**seed_record)
+        )
     model_cfg = train_cfg.model
     data_cfg = train_cfg.data
     optim_cfg = train_cfg.optimizer
@@ -642,6 +704,22 @@ def train(config: DictConfig) -> None:
                     "validation_loss": last_validation_loss,
                     "test_loss": test_loss,
                     "world_size": world_size,
+                    # Everything needed to rerun this exact configuration. The
+                    # seed alone is not enough: the same seed on a different
+                    # torch version or worker count can still diverge.
+                    "reproducibility": seed_record,
+                    "config": {
+                        "batch_size": int(train_cfg.batch_size),
+                        "gradient_accumulation_steps": int(
+                            train_cfg.get("gradient_accumulation_steps", 1)
+                        ),
+                        "parallel": parallel_mode,
+                        "master_dtype": str(master_dtype).replace("torch.", ""),
+                        "num_workers": int(data_cfg.get("num_workers", 0) or 0),
+                        "shuffle_buffer": int(data_cfg.get("shuffle_buffer", 0) or 0),
+                        "split_modulo": int(data_cfg.get("split_modulo", 20)),
+                        "lr": float(optim_cfg.get("lr", 0.0)),
+                    },
                 },
                 file,
                 indent=2,
