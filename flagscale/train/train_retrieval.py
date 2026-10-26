@@ -427,11 +427,20 @@ def build_lr_scheduler(
     warmup_steps = int(optim_cfg.get("warmup_steps", 0) or 0)
     min_lr = float(optim_cfg.get("min_lr", 0.0) or 0.0)
     base_lr = float(optim_cfg.lr)
-    total_steps = max(1, int(total_steps)) if total_steps else 1
-    warmup_steps = min(max(0, warmup_steps), max(1, total_steps - 1))
-    # ``total_steps`` starts as a placeholder when the caller cannot know it; the
-    # lambdas read it from this dict on every step, so updating one key is enough.
-    state: dict[str, Any] = {"total_steps": total_steps, "known": bool(total_steps)}
+    # `total_steps=None` means the streaming dataset has not been measured yet.
+    # Do NOT substitute a placeholder here: an earlier version did, which made
+    # `known` true, disabled the re-anchor below, and decayed the rate to min_lr
+    # by step 2 -- so every run trained at min_lr from start to finish. Hold at
+    # ``base_lr`` until the length is measured instead.
+    known_total = bool(total_steps)
+    state: dict[str, Any] = {
+        "total_steps": max(1, int(total_steps)) if known_total else 0,
+        "known": known_total,
+    }
+    if known_total:
+        # Only clamp against a total we can trust; clamping against a placeholder
+        # silently reduced a 200-step warmup to 1 step.
+        warmup_steps = min(max(0, warmup_steps), max(1, state["total_steps"] - 1))
 
     if min_lr > base_lr:
         raise ValueError(f"optimizer.min_lr ({min_lr}) must be <= optimizer.lr ({base_lr})")
@@ -444,6 +453,11 @@ def build_lr_scheduler(
         if warmup_steps and step < warmup_steps:
             return (step + 1) / warmup_steps
         if style == "constant":
+            return 1.0
+        if not state["known"]:
+            # Length still unknown: stay at base_lr rather than decaying against
+            # a guess. The first epoch therefore runs at warmup->base_lr, and the
+            # decay covers the remaining epochs.
             return 1.0
         total = max(1, int(state["total_steps"]))
         decay_steps = max(1, total - warmup_steps)
@@ -741,17 +755,20 @@ def train(config: DictConfig) -> None:
         # Re-anchor the schedule once the real epoch length is known. Without
         # this a streaming dataset would decay against a placeholder total, so
         # the cosine would either finish early or never reach min_lr.
-        if not lr_sched_state["known"] and epoch == 1:
-            # wandb_step is always allocated and counts optimizer steps, so it
-            # also tells us how long the first epoch actually was.
-            steps_done = int(wandb_step["optimizer_step"])
-            lr_sched_state["total_steps"] = max(1, steps_done * epochs)
-            lr_sched_state["known"] = True
-            if rank_zero():
-                log(
-                    f"lr schedule re-anchored: {steps_done} steps/epoch -> "
-                    f"total {lr_sched_state['total_steps']} for {epochs} epochs"
-                )
+        # Re-anchor at every epoch boundary: the streaming dataset's epoch
+        # length is only measurable by running one, and re-measuring keeps a
+        # short first epoch from fixing a wrong total for the whole run.
+        steps_done = int(wandb_step["optimizer_step"])
+        if steps_done > 0:
+            refined = max(1, round(steps_done / epoch * epochs))
+            if refined != lr_sched_state["total_steps"]:
+                lr_sched_state["total_steps"] = refined
+                lr_sched_state["known"] = True
+                if rank_zero():
+                    log(
+                        f"lr schedule anchored at epoch {epoch}: {steps_done} steps so far "
+                        f"-> total {refined} for {epochs} epochs"
+                    )
         validation_loss = evaluate_epoch(
             model, processor, validation_loader, task, device, temperature, dtype_name
         )

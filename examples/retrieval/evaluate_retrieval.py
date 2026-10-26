@@ -408,7 +408,11 @@ def main() -> None:
     parser.add_argument("--split-modulo", type=int, default=20)
     parser.add_argument("--num-negatives", type=int, default=15)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--max-samples", type=int, default=512)
+    # None means the whole split. A numeric default here silently capped every
+    # evaluation at 512 queries: evaluate_models.sh only passes --max-samples when
+    # MAX_SAMPLES is set, so its documented "default: whole split" was in fact
+    # 512. Full-split numbers and 512-query numbers are not comparable.
+    parser.add_argument("--max-samples", type=int, default=None)
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--temperature", type=float, default=0.05, help="unused for ranking; kept for clarity")
     parser.add_argument("--device", default="cpu")
