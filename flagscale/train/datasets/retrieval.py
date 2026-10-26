@@ -23,6 +23,7 @@ the COCO shards are already packaged as WebDataset-style tar files.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import random
@@ -37,20 +38,41 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 
-def split_accepts(index: int, split: str, modulo: int = 20) -> bool:
+def split_accepts(
+    index: int,
+    split: str,
+    modulo: int = 20,
+    group_key: str | None = None,
+) -> bool:
     """Return whether a deterministic row belongs to ``split``.
 
     T2Ranking ships only train shards.  For the native retrieval example we
     reserve 90%/5%/5% of rows for train/validation/test without materializing
     another copy of the dataset.  COCO's separately supplied test directory
     uses the ``all`` split and therefore bypasses this partition.
+
+    ``group_key`` makes the partition ignore ``index`` and bucket on a stable
+    hash of it instead.  T2Ranking answers one query with several relevant
+    passages, so a single query appears on ~14 rows; bucketing by row index
+    scattered those rows across splits and 89.4% of the test queries had also
+    been seen in training.  Passing the query text as ``group_key`` keeps every
+    row of a query in the same split, which is the only way the reported number
+    measures retrieval rather than memorisation.
     """
 
     split = str(split).lower()
     if split in {"all", "none"}:
         return True
     modulo = max(3, int(modulo))
-    bucket = index % modulo
+    if group_key is None:
+        bucket = index % modulo
+    else:
+        # hashlib rather than hash(): the built-in is salted per process, so the
+        # split would differ between runs and between the training and
+        # evaluation processes, which is exactly the reproducibility this
+        # module is supposed to guarantee.
+        digest = hashlib.blake2b(group_key.encode("utf-8"), digest_size=8).digest()
+        bucket = int.from_bytes(digest, "big") % modulo
     if split in {"train", "training"}:
         return bucket < modulo - 2
     if split in {"validation", "valid", "val"}:
@@ -187,7 +209,15 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
                 for row in batch.to_pylist():
                     row_index = seen
                     seen += 1
-                    if not split_accepts(row_index, self.split, self.split_modulo):
+                    # Bucket on the query, not the row: one t2ranking query
+                    # answers through ~14 rows, and splitting those by row
+                    # index leaked 89% of the test queries into training.
+                    if not split_accepts(
+                        row_index,
+                        self.split,
+                        self.split_modulo,
+                        group_key=str(row.get("anchor", "")),
+                    ):
                         continue
                     if accepted % world_size != rank:
                         accepted += 1
