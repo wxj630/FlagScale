@@ -115,6 +115,122 @@ def fsdp2_available() -> bool:
         return False
 
 
+def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
+    """Fill in `allgather_into_tensor_coalesced` when the vendor backend omits it.
+
+    FSDP2 gathers a param group with `allgather_into_tensor_coalesced`. Some
+    vendor builds of `ProcessGroupNCCL` ship ``allgather_coalesced`` (the
+    list-of-lists form) but not the ``into_tensor`` spelling, so FSDP2 dies with
+
+        AttributeError: 'ProcessGroupNCCL' object has no attribute
+                        'allgather_into_tensor_coalesced'
+
+    That is the entire difference measured on PPU: ``allgather_coalesced``
+    exists, the tensor-view name does not. FSDP2 passes one (output, input)
+    pair per param group, so the older API with a one-element outer list is the
+    exact equivalent -- the batching it adds is what FSDP2 does not use.
+
+    Preference order: fix it here rather than in Torch-FL, because this file is
+    ours to change and the vendor gap is a calling-convention mismatch, not a
+    missing capability.
+
+    Returns True when a shim was installed, False when the method already
+    exists or no equivalent is available.
+    """
+
+    try:
+        from torch._C._distributed_c10d import ProcessGroupNCCL
+    except Exception:
+        return False
+
+    if hasattr(ProcessGroupNCCL, "allgather_into_tensor_coalesced"):
+        return False
+    if not hasattr(ProcessGroupNCCL, "_allgather_base"):
+        log("coalesced all-gather shim: backend lacks _allgather_base; FSDP2 stays unavailable")
+        return False
+
+    def allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
+        # `allgather_coalesced` exists on this backend but raises
+        # NotImplementedError, so fall back to one `_allgather_base` per
+        # (output, input) pair. FSDP2 only needs the data gathered; coalescing
+        # is a batching optimisation, not a semantic requirement.
+        if len(output_tensors) != len(input_tensors):
+            raise ValueError(
+                "expected matching output/input counts, got "
+                f"{len(output_tensors)} and {len(input_tensors)}"
+            )
+        if opts is None:
+            from torch._C import _distributed_c10d as _c10d
+
+            opts = _c10d.AllgatherOptions()
+
+        works = []
+        for output_tensor, input_tensor in zip(output_tensors, input_tensors):
+            works.append(self._allgather_base(output_tensor, input_tensor, opts))
+        return works
+
+    ProcessGroupNCCL.allgather_into_tensor_coalesced = allgather_into_tensor_coalesced
+    log("coalesced all-gather shim installed: per-tensor _allgather_base fallback")
+
+    # The patch above is not enough on its own: the `_c10d_functional` operators
+    # are C++ with a statically registered CUDA kernel, so neither a Python
+    # attribute on the process group nor `torch.library` IMPL can replace them
+    # (`_dispatch_dump_table` shows CUDA bound to Functional.cpp). DTensor's
+    # `_to_replicate_tensor` reaches the broken path through the *Python*
+    # function `funcol.all_gather_tensor`, so that is what gets replaced.
+    try:
+        import torch.distributed._functional_collectives as _funcol
+
+        def _group_object(group, tag):
+            """Turn whatever DTensor passes into a ProcessGroup object."""
+            if isinstance(group, torch.distributed.ProcessGroup):
+                return group
+            # A DeviceMesh is the common case here; it knows its own group.
+            getter = getattr(group, "get_group", None)
+            if callable(getter):
+                try:
+                    return getter()
+                except Exception:
+                    pass
+            name = _funcol._resolve_group_name(group, tag)
+            if str(name) in {"0", "world"}:
+                return torch.distributed.group.WORLD
+            raise ValueError(f"cannot resolve process group {name!r}")
+
+        def _patched_all_gather_tensor(tensor, gather_dim, group, tag=""):
+            if not tensor.is_contiguous():
+                raise AssertionError("Tensor must be contiguous for all_gather_tensor")
+            if gather_dim != 0:
+                # The original only supports dim 0; keep that contract rather
+                # than silently doing something different.
+                raise NotImplementedError("all_gather_tensor shim supports gather_dim=0")
+            pg = _group_object(group, tag)
+            group_size = pg.size()
+            out = torch.empty(
+                tensor.numel() * group_size,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            # Call the process group directly: the public helper wraps the call in
+            # a logging decorator that resolves `dist.get_backend(group)` by name,
+            # which fails for the default group on this backend.
+            from torch._C import _distributed_c10d as _c10d
+
+            work = pg._allgather_base(
+                out.view(group_size, *tensor.shape), tensor, _c10d.AllgatherOptions()
+            )
+            if hasattr(work, "wait"):
+                work.wait()
+            return torch.ops._c10d_functional.wait_tensor(out)
+
+        _funcol.all_gather_tensor = _patched_all_gather_tensor
+        log("funcol.all_gather_tensor overridden (per-tensor fallback for this backend)")
+    except Exception as exc:  # pragma: no cover - backend/vendor dependent
+        log(f"coalesced all-gather shim: funcol override skipped ({type(exc).__name__}: {exc})")
+
+    return True
+
+
 def iter_transformer_blocks(module: nn.Module) -> Iterator[nn.Module]:
     """Yield the members of every repeated-block list, deepest first.
 
@@ -170,6 +286,10 @@ def apply_fsdp2(
 
     from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
     from torch.distributed.device_mesh import init_device_mesh
+
+    # Some vendor backends expose allgather_coalesced but not the into_tensor
+    # spelling FSDP2 calls; install the equivalent before sharding starts.
+    install_coalesced_allgather_shim(log=log)
 
     mesh = init_device_mesh(device_type, (world_size,))
     mp_policy = MixedPrecisionPolicy(
