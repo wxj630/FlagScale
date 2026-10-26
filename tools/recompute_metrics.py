@@ -30,14 +30,40 @@ def load(path: Path) -> dict:
 
 
 def ranks_from_scores(predictions: list[dict]) -> list[int]:
-    """Rank of the positive (candidate 0) among all candidates, ties as 1 + count."""
+    """Rank of the ground-truth candidate, ties counted as 1 + strictly-greater.
+
+    Two shapes are accepted, because image-text models store one row per item
+    over the whole candidate pool while text models store one row per query with
+    the positive first:
+
+    * ``ground_truth`` is an index into ``scores`` (any value)
+    * rows without it default to index 0, the positive-first layout
+    """
 
     ranks = []
     for row in predictions:
         scores = row["scores"]
-        positive = scores[0]
+        gt = int(row.get("ground_truth", 0))
+        if not 0 <= gt < len(scores):
+            raise SystemExit(
+                f"ground_truth {gt} out of range for a row with {len(scores)} scores"
+            )
+        positive = scores[gt]
         ranks.append(1 + sum(1 for s in scores if s > positive))
     return ranks
+
+
+def all_rank_sets(payload: dict) -> dict[str, list[int]]:
+    """Every rank list a predictions file describes, keyed by direction.
+
+    Text models have one; image-text models have two (text->image and the
+    reverse), which are reported separately and must not be mixed.
+    """
+
+    preds = payload["predictions"]
+    if isinstance(preds, dict):
+        return {direction: ranks_from_scores(rows) for direction, rows in preds.items()}
+    return {"": ranks_from_scores(preds)}
 
 
 def main() -> None:
@@ -59,22 +85,28 @@ def main() -> None:
     args = parser.parse_args()
 
     payload = load(args.predictions)
-    preds = payload["predictions"]
-    ranks = ranks_from_scores(preds)
-    n = len(ranks)
-    if n == 0:
+    rank_sets = all_rank_sets(payload)
+    if not rank_sets or all(len(v) == 0 for v in rank_sets.values()):
         raise SystemExit("no predictions in file")
 
     if args.verify_rank:
-        stored = [p["rank"] for p in preds]
-        mismatches = sum(1 for a, b in zip(stored, ranks) if a != b)
-        print(f"verify: {mismatches} / {n} rows disagree with stored rank")
-        if mismatches:
-            first = next(i for i, (a, b) in enumerate(zip(stored, ranks)) if a != b)
-            print(f"  first at row {first}: stored={stored[first]} from-scores={ranks[first]}")
+        # Text models store `rank`; image-text rows do not, so only check those
+        # that have it.
+        preds = payload["predictions"]
+        flat = preds if isinstance(preds, list) else [
+            row for rows in preds.values() for row in rows
+        ]
+        if any("rank" in row for row in flat):
+            stored = [row["rank"] for row in flat if "rank" in row]
+            derived = ranks_from_scores([row for row in flat if "rank" in row])
+            mismatches = sum(1 for a, b in zip(stored, derived) if a != b)
+            print(f"verify: {mismatches} / {len(stored)} rows disagree with stored rank")
+        else:
+            print("verify: no stored rank column in this file (image-text layout)")
 
     label = f"{payload.get('model_type', '?')} [{payload.get('split', '?')}] {args.predictions.name}"
-    print(f"{label}: {n} queries, {payload.get('num_negatives', '?')} negatives")
+    print(f"{label}: {payload.get('num_negatives', '?')} negatives, "
+          f"directions={list(rank_sets)}")
 
     def summarize(rs: list[int]) -> dict[str, float]:
         out = {}
@@ -89,17 +121,24 @@ def main() -> None:
                 ) / len(rs)
         return out
 
-    here = summarize(ranks)
-    for key, value in here.items():
-        print(f"  {key:12s} {value:.4f}")
-
+    other = None
     if args.compare:
-        other_payload = load(args.compare)
-        other = summarize(ranks_from_scores(other_payload["predictions"]))
-        print(f"\n  delta vs {args.compare.name} (this minus that)")
-        for key in here:
-            if key in other:
-                print(f"  {key:12s} {here[key] - other[key]:+.4f}")
+        other = {
+            direction: summarize(rs)
+            for direction, rs in all_rank_sets(load(args.compare)).items()
+        }
+
+    for direction, ranks in rank_sets.items():
+        if direction:
+            print(f"\n  [{direction}] {len(ranks)} items")
+        here = summarize(ranks)
+        for key, value in here.items():
+            print(f"  {key:12s} {value:.4f}")
+        if other is not None and direction in other:
+            print(f"  delta vs {args.compare.name} (this minus that)")
+            for key in here:
+                if key in other[direction]:
+                    print(f"  {key:12s} {here[key] - other[direction][key]:+.4f}")
 
 
 if __name__ == "__main__":

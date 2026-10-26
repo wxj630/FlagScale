@@ -232,7 +232,7 @@ def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tupl
 
     # Full N x N similarity, computed on the accelerator in row chunks so the
     # matrix itself does not have to live there in one piece.
-    text_ranks, image_ranks = _full_retrieval_ranks(text_all, image_all, device)
+    text_ranks, image_ranks, _ = _full_retrieval_ranks(text_all, image_all, device)
     return {
         "text_to_image": rank_metrics(text_ranks, ks),
         "image_to_text": rank_metrics(image_ranks, ks),
@@ -248,6 +248,7 @@ def evaluate_in_batch_streaming(
     ks: tuple[int, ...],
     task: str = "",
     row_chunk: int = 1024,
+    keep_scores: bool = False,
 ) -> dict:
     """Full-set image/text retrieval, encoding straight from the stream.
 
@@ -287,12 +288,16 @@ def evaluate_in_batch_streaming(
     image_all = torch.cat(image_embeddings, dim=0)
     print(f"  [encode] done: {text_all.shape[0]} texts x {image_all.shape[0]} images", flush=True)
 
-    text_ranks, image_ranks = _full_retrieval_ranks(text_all, image_all, device, row_chunk)
+    text_ranks, image_ranks, score_rows = _full_retrieval_ranks(
+        text_all, image_all, device, row_chunk, keep_scores=keep_scores
+    )
     result = {
         "text_to_image": rank_metrics(text_ranks, ks),
         "image_to_text": rank_metrics(image_ranks, ks),
         "samples": int(text_all.shape[0]),
     }
+    if keep_scores:
+        result["predictions"] = score_rows
     return result
 
 
@@ -301,7 +306,8 @@ def _full_retrieval_ranks(
     image_all: torch.Tensor,
     device: torch.device,
     row_chunk: int = 1024,
-) -> tuple[list[int], list[int]]:
+    keep_scores: bool = False,
+) -> tuple[list[int], list[int], dict]:
     """Ranks for text->image and image->text against the full candidate pool.
 
     Row-chunked so peak device memory is ``row_chunk * N`` floats (~20 MB for
@@ -309,6 +315,8 @@ def _full_retrieval_ranks(
     """
 
     n = text_all.shape[0]
+    t2i_rows: list[dict] = []
+    i2t_rows: list[dict] = []
     # The diagonal is the paired caption/image; the rank counts how many other
     # candidates score strictly higher, so ties do not inflate the rank.
     text_ranks: list[int] = []
@@ -318,6 +326,16 @@ def _full_retrieval_ranks(
         paired = sim[torch.arange(block.shape[0], device=device), torch.arange(start, start + block.shape[0], device=device)]
         better = (sim > paired.unsqueeze(1)).sum(dim=1)
         text_ranks.extend((better + 1).tolist())
+        if keep_scores:
+            # The full score row per text is what a new metric needs. Stored as
+            # float16: retrieval decisions are made on the ordering, and 5000
+            # candidates x 5000 texts in float32 would be 100 MB per direction.
+            for offset, row_scores in enumerate(sim.to(torch.float16).cpu()):
+                t2i_rows.append({
+                    "index": start + offset,
+                    "ground_truth": start + offset,
+                    "scores": row_scores.tolist(),
+                })
         del sim, paired, better
 
     image_ranks: list[int] = []
@@ -327,9 +345,56 @@ def _full_retrieval_ranks(
         paired = sim[torch.arange(block.shape[0], device=device), torch.arange(start, start + block.shape[0], device=device)]
         better = (sim > paired.unsqueeze(1)).sum(dim=1)
         image_ranks.extend((better + 1).tolist())
+        if keep_scores:
+            for offset, row_scores in enumerate(sim.to(torch.float16).cpu()):
+                i2t_rows.append({
+                    "index": start + offset,
+                    "ground_truth": start + offset,
+                    "scores": row_scores.tolist(),
+                })
         del sim, paired, better
 
-    return text_ranks, image_ranks
+    return text_ranks, image_ranks, {"text_to_image": t2i_rows, "image_to_text": i2t_rows}
+
+
+def write_predictions(
+    args,
+    model_path: str,
+    predictions,
+    num_negatives: int | None = None,
+) -> None:
+    """Persist per-item scores so metrics can be recomputed without the model.
+
+    Every model writes the same evidence, in the same shape, so one reader
+    (`tools/recompute_metrics.py`) covers all of them:
+
+    * text models: one row per query, candidate 0 is the positive, `scores` has
+      one entry per candidate.
+    * image-text models: one row per text (and per image for the reverse
+      direction), `ground_truth` is the paired item's index and `scores` spans
+      the whole pool.
+
+    Re-running an 8B model over the full test split to change a cutoff costs
+    hours; the scores are the only part that cannot be recreated cheaply.
+    """
+
+    if args.save_predictions == "auto":
+        predictions_path = Path((args.output or "predictions.json") + ".predictions.json")
+    else:
+        predictions_path = Path(args.save_predictions)
+    predictions_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "model_type": args.model_type,
+        "task": args.task,
+        "checkpoint": model_path,
+        "split": args.split,
+        "ground_truth_policy": "index0" if num_negatives is not None else "paired_index",
+        "predictions": predictions,
+    }
+    if num_negatives is not None:
+        payload["num_negatives"] = num_negatives
+    predictions_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    print(f"predictions -> {predictions_path}", flush=True)
 
 
 def main() -> None:
@@ -417,8 +482,10 @@ def main() -> None:
         # 5-15 GB of host RAM and gets the process OOM-killed on a busy host.
         # Only the embeddings need to persist.
         metrics = evaluate_in_batch_streaming(
-            model, dataset, device, args.batch_size, (1, 5, 10), args.task
+            model, dataset, device, args.batch_size, (1, 5, 10), args.task,
+            keep_scores=bool(args.save_predictions),
         )
+        predictions = metrics.pop("predictions", None)
         result = {
             "model_type": args.model_type,
             "task": args.task,
@@ -429,8 +496,14 @@ def main() -> None:
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
         if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
             with open(args.output, "w", encoding="utf-8") as file:
                 json.dump(result, file, indent=2)
+        if args.save_predictions and predictions:
+            # CLIP scores every text against every image, so a row holds the
+            # whole candidate pool -- the same evidence the text models store,
+            # just with the index of the paired item instead of passage text.
+            write_predictions(args, model_path, predictions)
         return
 
     rows = list(dataset)
@@ -466,29 +539,7 @@ def main() -> None:
         output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     if args.save_predictions:
-        # One row per query with its full candidate score vector. A new metric
-        # (recall@3, nDCG, per-length buckets) can then be computed from this
-        # file alone: re-running an 8B model over the whole test split just to
-        # change a cutoff costs hours, and the scores are the only part that
-        # cannot be cheaply recomputed.
-        if args.save_predictions == "auto":
-            predictions_path = Path((args.output or "predictions.json") + ".predictions.json")
-        else:
-            predictions_path = Path(args.save_predictions)
-        predictions_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "model_type": args.model_type,
-            "task": args.task,
-            "checkpoint": model_path,
-            "split": args.split,
-            "num_negatives": len(negative_keys),
-            # Candidate index 0 is always the positive, so a scorer can rely on
-            # that instead of having to match passage text.
-            "ground_truth_policy": "index0",
-            "predictions": predictions,
-        }
-        predictions_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        print(f"predictions -> {predictions_path}", flush=True)
+        write_predictions(args, model_path, predictions, num_negatives=len(negative_keys))
 
 
 if __name__ == "__main__":
