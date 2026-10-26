@@ -64,13 +64,13 @@ ln -sfn /flagos-search-ckpts     /flagos-retrieval-ckpts
 
 ```bash
 # 卡 0: BGE-M3
-bash /flagos-search-codes/run-a100.sh bge_m3 0
+bash examples/retrieval/run-a100.sh bge_m3 0    # 在 FlagScale 根目录执行
 
 # 卡 1: CLIP
-bash /flagos-search-codes/run-a100.sh clip_vit_large 1
+bash examples/retrieval/run-a100.sh clip_vit_large 1
 ```
 
-脚本内部（`scripts/run-a100.sh`）：
+脚本内部（`examples/retrieval/run-a100.sh`）：
 
 ```bash
 export CUDA_VISIBLE_DEVICES=<card>
@@ -131,7 +131,7 @@ for d in t2ranking wds_mscoco_captions2017; do
 done
 ```
 
-一键完成：`bash /workspace/setup-ppu-container.sh`
+一键完成：`bash examples/retrieval/setup-ppu-container.sh`（容器内，仓库挂在 /workspace）
 
 ### 运行命令
 
@@ -140,14 +140,14 @@ done
 ```bash
 # BGE-M3（容器 flagos-retrieval-bge，绑 ppu6）
 docker exec -d flagos-retrieval-bge bash -c \
-  "nohup bash /workspace/run-ppu-three.sh bge_m3 > /workspace/logs/launch-bge.log 2>&1"
+  "nohup bash /workspace/FlagScale/examples/retrieval/run-ppu-three.sh bge_m3 > /workspace/logs/launch-bge.log 2>&1"
 
 # CLIP（容器 flagos-retrieval-clip，绑 ppu7）
 docker exec -d flagos-retrieval-clip bash -c \
-  "nohup bash /workspace/run-ppu-three.sh clip_vit_large > /workspace/logs/launch-clip.log 2>&1"
+  "nohup bash /workspace/FlagScale/examples/retrieval/run-ppu-three.sh clip_vit_large > /workspace/logs/launch-clip.log 2>&1"
 ```
 
-脚本内部（`scripts/run-ppu-three.sh`）关键部分：
+脚本内部（`examples/retrieval/run-ppu-three.sh`）关键部分：
 
 ```bash
 export FLAGSCALE_DEVICE=flagos FS_PLATFORM=flagos
@@ -199,11 +199,11 @@ source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
 
 ```bash
 # BGE-M3 在卡 5，CLIP 在卡 4（一张卡一个模型）
-bash /data2/jiangxuhui/run-kunlunxin.sh bge_m3 5
-bash /data2/jiangxuhui/run-kunlunxin.sh clip_vit_large 4
+bash examples/retrieval/run-kunlunxin.sh bge_m3 5    # 在 FlagScale 根目录执行
+bash examples/retrieval/run-kunlunxin.sh clip_vit_large 4
 ```
 
-脚本内部（`scripts/run-kunlunxin.sh`）：
+脚本内部（`examples/retrieval/run-kunlunxin.sh`）：
 
 ```bash
 source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
