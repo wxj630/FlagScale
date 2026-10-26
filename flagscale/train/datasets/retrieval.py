@@ -33,6 +33,7 @@ from typing import Any
 
 from PIL import Image
 from omegaconf import DictConfig
+import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 
