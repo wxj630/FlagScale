@@ -155,6 +155,21 @@ def finish_distributed() -> None:
         dist.destroy_process_group()
 
 
+def _as_bool(value: Any) -> bool:
+    """Parse a config flag that may arrive as a string from ``oc.env``.
+
+    ``bool("false")`` is True, so a config written as
+    ``deterministic: ${oc.env:FLAGSCALE_DETERMINISTIC,false}`` used to enable
+    determinism for every run -- the opposite of the documented default.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def seed_everything(
     seed: int,
     rank: int,
@@ -599,7 +614,7 @@ def train(config: DictConfig) -> None:
     rank, world_size, device, platform = init_distributed(train_cfg.get("hardware", {}))
     task = str(train_cfg.task)
     seed = int(train_cfg.get("seed", 42))
-    deterministic = bool(train_cfg.get("deterministic", False))
+    deterministic = _as_bool(train_cfg.get("deterministic", False))
     seed_everything(seed, rank, device, platform, deterministic=deterministic)
     seed_record = reproducibility_record(seed, rank, world_size, device, platform, deterministic)
     if rank_zero():
