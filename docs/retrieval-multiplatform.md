@@ -297,10 +297,27 @@ $PY -m flagscale.run \
 
 ### reranker：两张卡跑 Megatron PP=2（**不用 FSDP2**）
 
-昆仑芯的 reranker **不走 FlagScale**，而是 `megatron-reranker/`（Megatron-LM-FL）：
-P800 的分配器满足不了 FSDP2 对不切片 fp32 `lm_head`（2.31 GiB）的请求，
-只能退到 bf16 master（8 字节/参数）；Megatron 的 distributed optimizer 能把
-fp32 主权重 + 两个 fp32 矩都切分，拿到 A100 基线用的 **16 字节/参数**。
+昆仑芯的 reranker **不走 FlagScale**，而是 `megatron-reranker/`（Megatron-LM-FL）。
+
+**FSDP2 在 P800 上卡住的原因，不是"lm_head 没被切分"**——切分是生效的
+（日志里 `oversized leaf: backbone.lm_head gathers 1185 MiB` 指的是
+**all-gather 之后的完整缓冲**，不是未分片副本）。真正的机制是：
+
+- FSDP2 每个 param group 在前向 pre-hook / 反向 pre-backward 要把整组参数
+  all-gather 成**一块连续缓冲**，每个 rank 都临时持有一份完整权重；
+- `lm_head` 是 151669×4096，fp32 下这块缓冲 = **2.31 GiB**，而且**不随卡数缩小**
+  （缩小的只是分片，缓冲始终是完整尺寸），所以加卡无用；
+- P800 不支持 `expandable_segments`（VMM 的 `cuMemAddressReserve` 返回
+  `801 NOT_SUPPORTED`），分配器必须找到**连续物理段**。实测 28.43 GiB 空闲仍申请
+  不出 2.31 GiB —— 碎片化了；
+- 把 `embed_tokens` / `lm_head` 各自拆成独立 group 后，最大单次请求从 2.31 GiB
+  降到 **1.16 GiB**（bf16），这样 bf16 master 能跑；
+- 但 fp32 master 下这块缓冲仍是 2.31 GiB，**所以 P800 的 FSDP2 只能停在
+  bf16 master（8 字节/参数）**，拿不到 A100 基线的 16 字节布局。
+
+Megatron 绕开的是这个缓冲本身：PP 把层切到不同 stage，每张卡只持有自己那些层，
+前向不需要把整个模型的参数 all-gather 起来；distributed optimizer 再分片
+fp32 主权重 + 两个 fp32 矩，于是拿到 A100 基线用的 **16 字节/参数**。
 
 ```bash
 cd /data2/jiangxuhui/megatron-reranker
@@ -384,10 +401,14 @@ bge/clip 是 0.6B 级，一卡一个模型用 DDP 就够了。reranker 8.19B 全
 
 ### 为什么不是同一个方案通吃
 
-- **昆仑芯不能用 FSDP2**：P800 分配器满足不了不切片的 fp32 `lm_head`
-  请求（2.31 GiB，`801 NOT_SUPPORTED`），只能退化到 bf16 master
-  （8 字节/参数），也就丢掉了这次实验的核心变量。Megatron 的 distributed
-  optimizer 分片的是优化器状态，不要求单块 2.31 GiB 连续显存。
+- **昆仑芯不能用 FSDP2 跑 fp32 master**：FSDP2 的切分本身是生效的，卡住的是
+  **all-gather 后的完整缓冲**——每个 param group 在每个 rank 上都要拼出一块完整
+  参数，`lm_head`（151669×4096）在 fp32 下就是 2.31 GiB，且不随卡数缩小。
+  P800 没有 `expandable_segments`，只能找连续物理段，28 GiB 空闲也失败。
+  bf16 下这块降到 1.16 GiB（再把它拆成独立 group），所以 FSDP2 只能停在
+  **bf16 master**，丢掉 16 字节/参数的 fp32 主权重。
+  Megatron 的 PP 不做整体 all-gather，distributed optimizer 又能分片 fp32 状态，
+  才拿到 16N。
 - **PPU 不用 Megatron**：Megatron-LM-FL 在 PPU 上没验证过，而 FSDP2 只需补一个
   all-gather shim 就能跑（见第三节）。按「适配开发量最小」原则选 FSDP2。
 - **A100 两者都行**，选 FSDP2 因为它是 FlagScale 原生路径，和 bge/clip 同一套
