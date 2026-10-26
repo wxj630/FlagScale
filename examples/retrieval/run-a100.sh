@@ -40,17 +40,33 @@ LOGS=$OUT/logs
 export TMPDIR="$OUT/tmp"
 mkdir -p "$OUT" "$LOGS" "$TMPDIR"
 
-echo "===== $model card=$card start $(date '+%F %T') ====="
+# The 8B reranker does not fit one card with 16-byte-per-parameter optimizer
+# state (8.19B x 16 = 131 GB), so it shards across both cards with FSDP2.  The
+# single-card models keep `ddp`: it is what the recorded bge/clip baselines used,
+# and switching them would change the numerics of a finished experiment.
+PARALLEL=ddp
+NPROC=1
+if [ "${model}" = "qwen3_reranker" ]; then
+  PARALLEL=fsdp2
+  NPROC=${RERANKER_CARDS:-2}
+  if [ "$NPROC" -gt 1 ]; then
+    # A card list was requested; torchrun indexes 0..N-1 inside the remapped
+    # namespace, so expose the chosen cards as a contiguous set.
+    export CUDA_VISIBLE_DEVICES="${3:-0,1}"
+  fi
+fi
+
+echo "===== $model cards=$CUDA_VISIBLE_DEVICES parallel=$PARALLEL nproc=$NPROC start $(date '+%F %T') ====="
 "$PY" -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
   action=test "train=$model" \
-  train.parallel=ddp train.master_dtype=fp32 \
-  experiment.runner.nproc_per_node=1 \
+  train.parallel=$PARALLEL train.master_dtype=fp32 \
+  experiment.runner.nproc_per_node="$NPROC" \
   train.hardware.device_type=cuda train.hardware.distributed_backend=auto \
   train.hardware.autocast_device=auto train.hardware.use_flaggems=false \
   train.output_dir="$OUT" experiment.exp_dir="$LOGS" \
   hydra.run.dir="$LOGS/hydra" \
   > "$LOGS/train-$model.log" 2>&1
 rc=$?
-echo "===== $model card=$card exit=$rc end $(date '+%F %T') ====="
+echo "===== $model cards=$CUDA_VISIBLE_DEVICES exit=$rc end $(date '+%F %T') ====="
 exit "$rc"
