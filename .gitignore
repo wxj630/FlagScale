@@ -28,3 +28,9 @@ template_funcs.py
 # Claude Code configuration (local only, do not commit)
 CLAUDE.md
 .claude/
+
+# Local secrets (W&B API key and per-user settings). The template is tracked;
+# the real file is pushed to the platform machines by sync.sh, never committed.
+.env
+.env.*
+!.env.example

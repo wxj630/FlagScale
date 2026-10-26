@@ -61,7 +61,10 @@ for model in "${models[@]}"; do
         DATA="$(value 'data.validation_path' || true)"
         [[ -n "$DATA" ]] || DATA="$(value data.path)"
       fi
-      echo "===== evaluating ${model} on ${SPLIT} (device) ====="
+      # No --max-samples: the default is the whole split. Passing a number here
+      # (it used to be 1000) made these numbers incomparable with a full-split
+      # evaluation of the same checkpoint.
+      echo "===== evaluating ${model} on ${SPLIT} (full split) ====="
       "$PYTHON" examples/retrieval/evaluate_retrieval.py \
         --model-type "${model}" \
         --model-path "$(value model.model_path)" \
@@ -71,9 +74,10 @@ for model in "${models[@]}"; do
         --split "$SPLIT" \
         --num-negatives "$(value 'data.num_negatives' || echo 1)" \
         --batch-size "${EVAL_BATCH_SIZE:-16}" \
-        --max-samples "${EVAL_MAX_SAMPLES:-1000}" \
+        ${EVAL_MAX_SAMPLES:+--max-samples "$EVAL_MAX_SAMPLES"} \
         --max-length "$(value 'model.max_length')" \
-        --device flagos \
+        --device "${EVAL_DEVICE:-flagos}" \
+        --save-predictions \
         --output "${RUN_ROOT}/eval/${model}_${SPLIT}_retrieval.json" \
         || echo "===== eval for ${model} failed (training result is still kept) ====="
     fi

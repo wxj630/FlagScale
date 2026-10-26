@@ -26,6 +26,8 @@
 #   MAX_SAMPLES   cap queries/images per run (default: whole split)
 #   BATCH_SIZE    override every model's batch (default: per-model below)
 #   WAIT_FOR_IDLE set to 1 to block until the device is free (default: 0)
+#   EVAL_DEVICE   device to evaluate on: flagos (Torch-FL hosts) or cuda
+#                 (native CUDA / vendor XPytorch). Default: flagos
 #   SAVE_PREDICTIONS 1 to also write per-query scores/ranks (default: 1)
 #                    They are what a later metric needs; without them a cutoff
 #                    change means re-running the model for hours.
@@ -48,10 +50,11 @@ WAIT_FOR_IDLE="${WAIT_FOR_IDLE:-0}"
 SAVE_PREDICTIONS="${SAVE_PREDICTIONS:-1}"
 CONF_DIR="examples/retrieval/conf/train"
 
-export FLAGSCALE_DEVICE=flagos
-export FS_PLATFORM=flagos
-export FLAGSCALE_DISTRIBUTED_BACKEND=flagos
-export FLAGSCALE_AUTOCAST_DEVICE=flagos
+# Follow the device the caller asked for. These used to be hardcoded to flagos,
+# which made `evaluate_retrieval.py` import torch_fl on hosts that do not have it
+# (A100, and Kunlunxin's vendor torch) and fail with ModuleNotFoundError.
+export FLAGSCALE_DEVICE="${EVAL_DEVICE:-flagos}"
+export FS_PLATFORM="${EVAL_DEVICE:-flagos}"
 # Long-sequence 8B models evaluate close to the card's capacity; fragmentation
 # otherwise turns a workable run into an OOM partway through.
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
@@ -128,7 +131,10 @@ for model in $MODELS; do
       --num-negatives "$NUM_NEGATIVES"
       --batch-size "$batch"
       --max-length "$max_length"
-      --device flagos
+      # Not hardcoded to `flagos`: the A100 host and the Kunlunxin vendor venv
+      # have no torch_fl, so they evaluate on `cuda`. Matches the device_type the
+      # training run used (AGENTS.md section 8).
+      --device "${EVAL_DEVICE:-flagos}"
       --output "${EVAL_DIR}/${model}_${split}_${tag}.json"
     )
     # Per-query scores, so a new cutoff or metric does not require another pass.

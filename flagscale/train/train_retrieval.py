@@ -314,6 +314,29 @@ def save_model(
             json.dump({"task": task, "world_size": int(os.environ.get("WORLD_SIZE", "1"))}, file, indent=2)
 
 
+def load_dotenv(path: Path | None = None) -> None:
+    """Read KEY=VALUE pairs from the repo's .env into the environment.
+
+    The file is gitignored and pushed separately (see sync.sh), so the training
+    code is the only place that knows where the credentials live. Parsed here
+    rather than with python-dotenv: one file, one format, no new dependency.
+
+    Existing environment variables win, so a caller can still override.
+    """
+
+    candidate = path or (Path(__file__).resolve().parents[2] / ".env")
+    if not candidate.is_file():
+        return
+    for line in candidate.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def init_wandb(train_cfg: DictConfig, model_cfg: DictConfig, output_dir: Path) -> Any:
     """Initialize W&B on rank zero when WANDB_API_KEY is present.
 
@@ -322,6 +345,7 @@ def init_wandb(train_cfg: DictConfig, model_cfg: DictConfig, output_dir: Path) -
     never copied into the Hydra config or checkpoint directory.
     """
 
+    load_dotenv()
     if not rank_zero() or os.environ.get("WANDB_DISABLED", "").lower() in {"1", "true", "yes"}:
         return None
     # The SDK may already be authenticated through ``wandb login``/netrc.
