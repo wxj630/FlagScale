@@ -115,12 +115,111 @@ def fsdp2_available() -> bool:
         return False
 
 
+def _allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
+    """Equivalent of the missing method: one ``_allgather_base`` per pair.
+
+    ``allgather_coalesced`` exists on some vendor backends but raises
+    NotImplementedError, so fall back to the per-tensor form.  FSDP2 only needs
+    the data gathered; coalescing is a batching optimisation, not a semantic
+    requirement.
+    """
+
+    if len(output_tensors) != len(input_tensors):
+        raise ValueError(
+            "expected matching output/input counts, got "
+            f"{len(output_tensors)} and {len(input_tensors)}"
+        )
+    if opts is None:
+        from torch._C import _distributed_c10d as _c10d
+
+        opts = _c10d.AllgatherOptions()
+
+    works = []
+    for output_tensor, input_tensor in zip(output_tensors, input_tensors):
+        works.append(self._allgather_base(output_tensor, input_tensor, opts))
+    return works
+
+
+def _process_group_classes() -> list[type]:
+    """Backend process-group classes that may lack the coalesced all-gather.
+
+    Keyed by the collective name each vendor backend registers.  FSDP2 picks the
+    class from the live process group, so a patch has to land on the class the
+    running backend actually uses:
+
+    * CUDA / PPU (Torch-FL CUDA boxing) / Kunlunxin vendor torch -> NCCL
+    * Ascend -> HCCL; ``torch_npu`` registers ``ProcessGroupHCCL`` and there is
+      no ``ProcessGroupNCCL`` on that box at all, which is why a NCCL-only shim
+      left FSDP2 unrunnable there.
+    * Other vendors expose their own class or none; the funcol override below
+      covers them regardless of which class the group belongs to.
+    """
+
+    classes: list[type] = []
+
+    def _add(cls) -> None:
+        if isinstance(cls, type) and cls not in classes:
+            classes.append(cls)
+
+    # NCCL: CUDA, PPU (Torch-FL CUDA boxing), Kunlunxin's vendor torch.
+    try:
+        from torch._C._distributed_c10d import ProcessGroupNCCL
+
+        _add(ProcessGroupNCCL)
+    except Exception:
+        pass
+
+    # HCCL: Ascend.  torch_npu owns the `npu` device and there is no
+    # ProcessGroupNCCL on that box at all.  The class has moved between torch_npu
+    # releases (`torch_npu._C._distributed_c10d`, and in some builds it is
+    # re-exported from `torch.distributed.distributed_c10d`), so probe by
+    # attribute instead of a single `from ... import` path.
+    try:
+        import torch_npu  # noqa: F401
+
+        hccl_candidates = []
+        c_ext = getattr(torch_npu, "_C", None)
+        for holder in (
+            getattr(c_ext, "_distributed_c10d", None) if c_ext is not None else None,
+            getattr(c_ext, "distributed_c10d", None) if c_ext is not None else None,
+            c_ext,
+            torch_npu,
+        ):
+            if holder is not None:
+                hccl_candidates.append(getattr(holder, "ProcessGroupHCCL", None))
+        try:
+            from torch.distributed.distributed_c10d import ProcessGroupHCCL as _PGH
+
+            hccl_candidates.append(_PGH)
+        except Exception:
+            pass
+        try:
+            from torch._C._distributed_c10d import ProcessGroupHCCL as _PGH2
+
+            hccl_candidates.append(_PGH2)
+        except Exception:
+            pass
+        for candidate in hccl_candidates:
+            if candidate is not None:
+                _add(candidate)
+    except Exception:
+        pass
+
+    try:
+        from torch._C._distributed_c10d import ProcessGroupGloo
+
+        _add(ProcessGroupGloo)
+    except Exception:
+        pass
+    return classes
+
+
 def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
     """Fill in `allgather_into_tensor_coalesced` when the vendor backend omits it.
 
     FSDP2 gathers a param group with `allgather_into_tensor_coalesced`. Some
-    vendor builds of `ProcessGroupNCCL` ship ``allgather_coalesced`` (the
-    list-of-lists form) but not the ``into_tensor`` spelling, so FSDP2 dies with
+    vendor builds ship ``allgather_coalesced`` (the list-of-lists form) but not
+    the ``into_tensor`` spelling, so FSDP2 dies with
 
         AttributeError: 'ProcessGroupNCCL' object has no attribute
                         'allgather_into_tensor_coalesced'
@@ -130,6 +229,10 @@ def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
     pair per param group, so the older API with a one-element outer list is the
     exact equivalent -- the batching it adds is what FSDP2 does not use.
 
+    The patch goes onto every backend class this host exposes rather than only
+    NCCL: on Ascend the group is a ``ProcessGroupHCCL`` and the NCCL class does
+    not exist, so the earlier NCCL-only version could never have worked there.
+
     Preference order: fix it here rather than in Torch-FL, because this file is
     ours to change and the vendor gap is a calling-convention mismatch, not a
     missing capability.
@@ -138,39 +241,34 @@ def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
     exists or no equivalent is available.
     """
 
-    try:
-        from torch._C._distributed_c10d import ProcessGroupNCCL
-    except Exception:
+    classes = _process_group_classes()
+    if not classes:
+        log("coalesced all-gather shim: no backend process-group class importable")
         return False
 
-    if hasattr(ProcessGroupNCCL, "allgather_into_tensor_coalesced"):
+    patched: list[str] = []
+    skipped: list[str] = []
+    for cls in classes:
+        name = cls.__name__
+        if hasattr(cls, "allgather_into_tensor_coalesced"):
+            skipped.append(name)
+            continue
+        if not hasattr(cls, "_allgather_base"):
+            skipped.append(f"{name}(no _allgather_base)")
+            continue
+        if not hasattr(cls, "allgather_into_tensor_coalesced"):
+            cls.allgather_into_tensor_coalesced = _allgather_into_tensor_coalesced
+            patched.append(name)
+    if not patched:
+        log(
+            "coalesced all-gather shim: nothing to patch "
+            f"({', '.join(skipped) or 'no classes'}); the backend already provides it"
+        )
         return False
-    if not hasattr(ProcessGroupNCCL, "_allgather_base"):
-        log("coalesced all-gather shim: backend lacks _allgather_base; FSDP2 stays unavailable")
-        return False
-
-    def allgather_into_tensor_coalesced(self, output_tensors, input_tensors, opts=None):
-        # `allgather_coalesced` exists on this backend but raises
-        # NotImplementedError, so fall back to one `_allgather_base` per
-        # (output, input) pair. FSDP2 only needs the data gathered; coalescing
-        # is a batching optimisation, not a semantic requirement.
-        if len(output_tensors) != len(input_tensors):
-            raise ValueError(
-                "expected matching output/input counts, got "
-                f"{len(output_tensors)} and {len(input_tensors)}"
-            )
-        if opts is None:
-            from torch._C import _distributed_c10d as _c10d
-
-            opts = _c10d.AllgatherOptions()
-
-        works = []
-        for output_tensor, input_tensor in zip(output_tensors, input_tensors):
-            works.append(self._allgather_base(output_tensor, input_tensor, opts))
-        return works
-
-    ProcessGroupNCCL.allgather_into_tensor_coalesced = allgather_into_tensor_coalesced
-    log("coalesced all-gather shim installed: per-tensor _allgather_base fallback")
+    log(
+        "coalesced all-gather shim installed on "
+        f"{', '.join(patched)}: per-tensor _allgather_base fallback"
+    )
 
     # The patch above is not enough on its own: the `_c10d_functional` operators
     # are C++ with a statically registered CUDA kernel, so neither a Python

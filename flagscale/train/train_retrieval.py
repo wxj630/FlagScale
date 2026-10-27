@@ -119,16 +119,23 @@ def init_distributed(
                 "unavailable. Import torch_fl before torch and use its matching "
                 "PyTorch 2.10.x environment."
             )
-    elif requested not in {"auto", "", "cuda"}:
+    elif requested in {"auto", "", "cuda"}:
+        # `cuda` is the documented path for a native NVIDIA build.  A vendor
+        # runtime that renames its accelerator to `cuda` (Kunlunxin's XPytorch)
+        # reports platform "cuda" too, so this check stays as it was.
+        if requested == "cuda" and platform is not None and platform.name() != "cuda":
+            raise RuntimeError(
+                "device_type=cuda was requested, but the active runtime exposes "
+                f"{platform.name()!r}. Use device_type=flagos with Torch-FL or a "
+                "native CUDA PyTorch environment."
+            )
+    else:
+        # Any other native vendor platform FlagScale registers (npu, musa, txda).
+        # Ascend is the case this exists for: torch_npu owns the `npu` device and
+        # HCCL is its collective, so no Torch-FL involvement is needed.
         if platform is None or platform.name() != requested:
             raise RuntimeError(f"Requested platform {requested!r} is unavailable")
-    elif requested == "cuda" and platform is not None and platform.name() != "cuda":
-        raise RuntimeError(
-            "device_type=cuda was requested, but the active runtime exposes "
-            f"{platform.name()!r}. Use device_type=flagos with Torch-FL or a "
-            "native CUDA PyTorch environment."
-        )
-    elif requested in {"auto", ""} and platform is None:
+    if requested in {"auto", ""} and platform is None:
         # Preserve the standalone CPU fallback used by small unit tests.
         device = torch.device("cpu")
         device_kind = "cpu"
@@ -202,8 +209,12 @@ def seed_everything(
         torch.cuda.manual_seed_all(seed)
 
     if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        # cuDNN knobs are CUDA-only and harmless elsewhere; the algorithm switch
+        # is generic.  Ascend/vendor runtimes may not implement every
+        # deterministic kernel, hence warn_only rather than a hard failure.
+        if hasattr(torch.backends, "cudnn"):
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
         torch.use_deterministic_algorithms(True, warn_only=True)
 
 
@@ -222,7 +233,10 @@ def reproducibility_record(
         "seed_per_rank": int(seed + rank),
         "world_size": int(world_size),
         "device": str(device),
-        "platform": platform.name() if platform is not None else "cuda",
+        # Record the real platform even when no adapter matched: hardcoding
+        # "cuda" here mislabels an Ascend or vendor run, and metrics.json is what
+        # later comparisons key off.
+        "platform": platform.name() if platform is not None else device.type,
         "deterministic": bool(deterministic),
         "python_hash_seed": os.environ.get("PYTHONHASHSEED"),
         "torch_version": torch.__version__,
@@ -725,11 +739,17 @@ def train(config: DictConfig) -> None:
             log=log,
         )
     elif world_size > 1:
+        # NCCL- and HCCL-backed replicas register their params on the process's
+        # current device, so DDP wants that index spelled out; the flagos
+        # (Torch-FL PrivateUse1) path has validated with device_ids=None and is
+        # left alone.  Ascend is the reason `npu` is listed: torch_npu refuses
+        # to construct a reducer without an explicit device_ids.
+        ddp_device_ids = None
+        if platform is not None and platform.name() in {"cuda", "npu", "musa"}:
+            ddp_device_ids = [device.index]
         model = DDP(
             model,
-            device_ids=[device.index]
-            if platform is not None and platform.name() == "cuda"
-            else None,
+            device_ids=ddp_device_ids,
             # The adapters hold no buffers that need cross-rank synchronisation
             # (pooling is computed from the input mask), and the default
             # broadcast_buffers=True rewrites the tokenizer's input tensors in

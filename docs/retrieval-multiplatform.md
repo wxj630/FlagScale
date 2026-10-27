@@ -7,6 +7,10 @@
 > 超参（batch / lr / epochs / max_length / 数据 split）一律不动，否则结果不可比。
 > 详见仓库根目录 `AGENTS.md` 第八节。
 
+**昇腾（Ascend）不在这份文档里**：它走 `torch_npu` 原生 `npu` 设备 + HCCL，
+不需要 Torch-FL，而本机无法直连那台机器（只能堡垒机手拷）。单独看
+[`retrieval-ascend.md`](retrieval-ascend.md)。
+
 **reranker 与 bge/clip 的本质区别**：8B 全参训练需要 16 字节/参数
 （fp32 主权重 + 两个 fp32 Adam 矩 = 8.19B × 16 ≈ **131 GB**），单张 80/96 GB 卡
 放不下。所以 bge/clip 是「一卡一个模型」的 DDP，**reranker 必须两卡并行**，
