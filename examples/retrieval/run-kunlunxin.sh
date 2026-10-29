@@ -19,6 +19,9 @@ card=${2:-1}
 export CUDA_VISIBLE_DEVICES="$card"
 export XPU_VISIBLE_DEVICES="$card"
 
+VN=${FLAGSCALE_PYTHON_ENV:-/data2/jiangxuhui/envs/retrieval-vendor}
+PY="$VN/bin/python"
+
 # Outputs and scratch on the data disk: the host / is 100% full and anything
 # written under it fails with ENOSPC mid-run.
 OUT=/data2/jiangxuhui/flagos-retrieval-ckpts/${model}
@@ -31,13 +34,47 @@ export FLAGOS_USE_FLAGGEMS=false
 export PYTHONUNBUFFERED=1
 
 echo "===== $model card=$card start $(date '+%F %T') ====="
+# Both backends go through `flagscale.run`: it renders the hydra config and
+# launches torchrun with the requested nproc, so the Megatron route gets the
+# same config system, exp directory and logging as DDP/FSDP2.
+#
+# The reranker takes EXTRA args for two P800-specific reasons:
+#   * `parallel=megatron`: P800's CUDA shim has no `expandable_segments`, so
+#     FSDP2 cannot allocate the 2.31 GiB contiguous all-gather buffer for
+#     `lm_head` and degrades to bf16 master weights.  Megatron's pipeline
+#     parallel never materialises the whole model on one rank, and its
+#     distributed optimizer still shards the fp32 state (16 bytes/param).
+#   * `skip_nonfinite`: fp32-master training diverges here without it.
+EXTRA=()
+PARALLEL=ddp
+NPROC=1
+if [ "$model" = "qwen3_reranker" ]; then
+  PARALLEL=megatron
+  NPROC=$(awk -F, '{print NF}' <<< "$CUDA_VISIBLE_DEVICES")
+  STAGE_DIR=${FLAGSCALE_STAGE_DIR:-$ROOT/../megatron-reranker/work/pp${NPROC}-8b}
+  if [ ! -f "$STAGE_DIR/stage0.pt" ]; then
+    echo "missing $STAGE_DIR/stage0.pt" >&2
+    echo "convert once with:" >&2
+    echo "  python -m flagscale.models.retrieval.qwen3_reranker_megatron convert \\" >&2
+    echo "      --model /flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B \\" >&2
+    echo "      --pp $NPROC --out $STAGE_DIR" >&2
+    exit 1
+  fi
+  EXTRA+=(
+    "train.pipeline_model_parallel_size=$NPROC"
+    "train.stage_dir=$STAGE_DIR"
+    "train.skip_nonfinite=true"
+  )
+fi
+
 $PY -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
   action=test "train=$model" \
-  train.parallel=ddp train.master_dtype=fp32 \
-  experiment.runner.nproc_per_node=1 \
+  train.parallel=$PARALLEL train.master_dtype=fp32 \
+  experiment.runner.nproc_per_node="$NPROC" \
   train.hardware.device_type=cuda train.hardware.distributed_backend=auto \
   train.hardware.autocast_device=auto train.hardware.use_flaggems=false \
+  "${EXTRA[@]}" \
   train.output_dir="$OUT" experiment.exp_dir="$LOGS" \
   hydra.run.dir="$LOGS/hydra" \
   > "$LOGS/train-$model.log" 2>&1

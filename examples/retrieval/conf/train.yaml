@@ -52,7 +52,33 @@ train:
   # behaviour); `fsdp2` shards parameters, gradients and optimizer state with
   # torch's composable FSDP, which divides the ~16-bytes-per-parameter budget by
   # the world size instead of replicating it per card.
+  #
+  # `megatron` hands the run to Megatron-LM-FL's pipeline schedule
+  # (flagscale/train/utils/megatron_pp.py).  It is the route for chips whose
+  # FSDP2 cannot hold fp32 master weights: P800 has no `expandable_segments`, so
+  # the 2.31 GiB all-gather buffer for `lm_head` cannot be allocated once memory
+  # fragments and the run falls back to bf16 master.  The data split, prompt
+  # framing, per-epoch checkpoint layout and metrics.json are shared with the
+  # other two routes.
   parallel: ${oc.env:FLAGSCALE_PARALLEL,ddp}
+
+  # Pipeline/tensor split for `parallel=megatron`. PP must equal the card count
+  # (TP=1): Qwen3-8B has 32 attention heads, so TP>1 has no validated mapping
+  # for its group-interleaved QKV.
+  pipeline_model_parallel_size: ${oc.env:FLAGSCALE_PP,1}
+  tensor_model_parallel_size: ${oc.env:FLAGSCALE_TP,1}
+
+  # Directory holding the converted per-stage weights (stage{K}.pt), produced by
+  #   python -m flagscale.models.retrieval.qwen3_reranker_megatron convert \
+  #       --model <HF checkpoint> --pp <N> --out <this dir>
+  # Required when `parallel=megatron`.
+  stage_dir: ${oc.env:FLAGSCALE_STAGE_DIR,null}
+
+  # Attention kernel and non-finite-update handling for `parallel=megatron`.
+  # Vendor runtimes compile per shape, so the padded width must stay constant;
+  # a width that changes every step recompiles every step and looks like a hang.
+  attention_backend: ${oc.env:FLAGSCALE_ATTN_BACKEND,flash}
+  skip_nonfinite: ${oc.env:FLAGSCALE_SKIP_NONFINITE,false}
 
   # Dtype the optimizer operates on. `bf16` matches the historical runs, where
   # the moments are bf16 too -- with a 1e-5 learning rate that update is below

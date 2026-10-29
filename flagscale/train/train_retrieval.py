@@ -661,6 +661,251 @@ def evaluate_epoch(
     return reduce_metrics(total_loss, count, device)
 
 
+def _train_megatron(
+    *,
+    train_cfg: DictConfig,
+    model_cfg: DictConfig,
+    data_cfg: DictConfig,
+    optim_cfg: DictConfig,
+    model_type: str,
+    task: str,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+    seed: int,
+    seed_record: dict[str, Any],
+    platform: Any = None,
+) -> None:
+    """``train.parallel=megatron``: pipeline-parallel training via Megatron-LM-FL.
+
+    Only the parallel layer differs from the DDP/FSDP2 path above.  The data
+    split, prompt framing, score tokens, per-epoch checkpoint directory, wandb
+    run and ``metrics.json`` all come from the same helpers, so a Megatron run
+    is comparable with an FSDP2 one instead of being a separate experiment.
+
+    Two things live outside FlagScale and must exist first:
+
+    * ``Megatron-LM-FL`` importable (see ``tools/install/*/install_train.sh``),
+    * the converted per-stage weights, produced once with
+      ``python -m flagscale.models.retrieval.qwen3_reranker_megatron convert``.
+    """
+
+    from flagscale.models.retrieval.qwen3_reranker import (
+        DEFAULT_INSTRUCTION,
+        RERANK_SYSTEM,
+    )
+    from flagscale.train.utils.megatron_pp import (
+        MegatronPipelineTrainer,
+        count_split_rows,
+    )
+
+    hardware_cfg = train_cfg.get("hardware", {})
+    pp = int(train_cfg.get("pipeline_model_parallel_size", world_size))
+    tp = int(train_cfg.get("tensor_model_parallel_size", 1))
+    if pp * tp != world_size:
+        raise RuntimeError(
+            f"pipeline_model_parallel_size({pp}) * tensor_model_parallel_size({tp}) "
+            f"must equal world_size({world_size})"
+        )
+
+    stage_dir = str(train_cfg.get("stage_dir") or "")
+    if not stage_dir:
+        raise RuntimeError(
+            "train.parallel=megatron needs train.stage_dir pointing at the "
+            "converted stage{K}.pt files"
+        )
+
+    data_path = str(data_cfg.get("train_path", data_cfg.get("path")))
+    split_modulo = int(data_cfg.get("split_modulo", 20))
+    num_negatives = int(data_cfg.get("num_negatives", 1))
+    max_length = int(model_cfg.get("max_length", 640))
+    score_ids = (
+        int(model_cfg.get("true_token_id", 9693)),
+        int(model_cfg.get("false_token_id", 9692)),
+    )
+
+    batch_rows = int(train_cfg.get("batch_size", 1))
+    grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
+    epochs = int(train_cfg.get("epochs", 3))
+    log_every = int(train_cfg.get("log_every", 1))
+    save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
+    output_dir = Path(str(train_cfg.output_dir))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wandb_run = init_wandb(train_cfg, model_cfg, output_dir)
+
+    trainer = MegatronPipelineTrainer(
+        model_path=str(model_cfg.model_path),
+        stage_dir=stage_dir,
+        pp=pp,
+        tp=tp,
+        micro_batch_rows=batch_rows,
+        grad_accum=grad_accum,
+        max_length=max_length,
+        pairs_per_row=1 + num_negatives,
+        score_token_ids=score_ids,
+        instruction=str(model_cfg.get("instruction", DEFAULT_INSTRUCTION)),
+        lr=float(optim_cfg.get("lr", 1.0e-5)),
+        min_lr=float(optim_cfg.get("min_lr", 1.0e-6)),
+        lr_decay_style=str(optim_cfg.get("lr_decay_style", "cosine")),
+        warmup_steps=int(optim_cfg.get("warmup_steps", 0)),
+        weight_decay=float(optim_cfg.get("weight_decay", 0.01)),
+        clip_grad=float(optim_cfg.get("max_grad_norm", 1.0)),
+        seed=seed,
+        device=device,
+        backend=str(hardware_cfg.get("distributed_backend", "nccl")),
+        attention_backend=str(train_cfg.get("attention_backend", "flash")),
+        recompute=not bool(train_cfg.get("no_recompute", False)),
+        skip_nonfinite=_as_bool(train_cfg.get("skip_nonfinite", False)),
+        log_every=log_every,
+        log=log,
+    )
+
+    # The loaders are the same builders DDP/FSDP2 use, so the split rule can
+    # only ever be the one FlagScale implements.
+    train_loader, validation_loader, test_loader = build_split_loaders(
+        task,
+        data_cfg,
+        batch_rows,
+        pin_memory=bool(platform and platform.supports_pin_memory()),
+        seed=seed + rank,
+    )
+
+    # A step budget is required: the pipeline schedule pulls from an iterator,
+    # and an iterator that ends early on one rank deadlocks the others.
+    train_rows_total = count_split_rows(
+        data_path, "train", split_modulo=split_modulo, log=log
+    )
+    rows_per_step = batch_rows * (1 + num_negatives) * grad_accum
+    steps_per_epoch = max(1, train_rows_total // rows_per_step)
+    total_steps = steps_per_epoch * epochs
+    log(
+        f"megatron plan: {train_rows_total} train rows, {steps_per_epoch} steps/epoch, "
+        f"{total_steps} total over {epochs} epoch(s), pp={pp} tp={tp}"
+    )
+    trainer.reanchor_schedule(total_steps)
+
+    history: list[dict[str, Any]] = []
+    best_eval = float("inf")
+    training_started = time.time()
+    train_loss = None
+    validation_loss = None
+    for epoch in range(1, epochs + 1):
+        stats = trainer.train_epoch(train_loader, epoch, epochs, steps_per_epoch)
+        train_loss = stats["loss"]
+        validation = trainer.evaluate(validation_loader)
+        validation_loss = validation["loss"]
+        log(
+            f"epoch={epoch}/{epochs} train_loss={train_loss:.6f} "
+            f"validation_loss={validation_loss:.6f} device={device}"
+        )
+        history.append(
+            {
+                "epoch": epoch,
+                "train_loss": train_loss,
+                "validation_loss": validation_loss,
+                "steps": trainer.steps_done,
+                "elapsed_s": time.time() - training_started,
+            }
+        )
+        if wandb_run is not None:
+            wandb_run.log(
+                {
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "validation/loss": validation_loss,
+                    "train/optimizer_step": trainer.steps_done,
+                }
+            )
+
+        if save_every_epoch:
+            # Same directory layout as the DDP/FSDP2 path, so every platform's
+            # run can be resumed and evaluated by the same tooling.  A
+            # single overwritten file is what lost the best P800 weights once.
+            epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
+            save_megatron_stage(trainer, epoch_dir, tensorboard=torch)
+            log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
+
+            if validation_loss == validation_loss and validation_loss < best_eval:
+                best_eval = validation_loss
+                save_megatron_stage(trainer, output_dir / "checkpoint-best", tensorboard=torch)
+                log(f"epoch {epoch}: new best validation loss {best_eval:.6f} -> checkpoint-best")
+
+    test_loss = trainer.evaluate(test_loader)["loss"]
+    if rank_zero():
+        log(f"test_loss={test_loss:.6f} epochs={epochs} elapsed={time.time() - training_started:.1f}s")
+        if wandb_run is not None:
+            wandb_run.log({"test/loss": test_loss, "train/optimizer_step": trainer.steps_done})
+
+    save_megatron_stage(trainer, output_dir, tensorboard=torch)
+    if rank_zero():
+        metrics = {
+            "task": task,
+            "parallel": "megatron",
+            "pipeline_model_parallel_size": pp,
+            "tensor_model_parallel_size": tp,
+            "epochs": epochs,
+            "train_loss": train_loss,
+            "validation_loss": validation_loss,
+            "test_loss": test_loss,
+            "best_validation_loss": best_eval if best_eval != float("inf") else None,
+            "world_size": world_size,
+            "reproducibility": seed_record,
+            "history": history,
+            "config": {
+                "model_type": model_type,
+                "batch_size": batch_rows,
+                "gradient_accumulation_steps": grad_accum,
+                "num_negatives": num_negatives,
+                "max_length": max_length,
+                "lr": float(optim_cfg.get("lr", 1.0e-5)),
+                "lr_decay_style": str(optim_cfg.get("lr_decay_style", "cosine")),
+                "warmup_steps": int(optim_cfg.get("warmup_steps", 0)),
+                "split_modulo": split_modulo,
+                "data_path": data_path,
+            },
+        }
+        with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:
+            json.dump(metrics, file, indent=2, default=str)
+        (output_dir / "training_complete.json").write_text(
+            json.dumps({"task": task, "world_size": world_size, "parallel": "megatron"},
+                       indent=2),
+            encoding="utf-8",
+        )
+        log(f"wrote {output_dir / 'metrics.json'}")
+
+    if wandb_run is not None:
+        wandb_run.finish()
+    trainer.destroy()
+    finish_distributed()
+
+
+def save_megatron_stage(trainer: Any, target: Path) -> None:
+    """Write this rank's pipeline stage into ``target/stage{K}.pt``.
+
+    Collective: every rank calls it, because flushing the fp32 master into the
+    bf16 parameters touches that rank's optimizer shards.
+
+    Every rank writes its *own* stage file.  Gating the write on ``rank_zero()``
+    would silently save only stage0: with pipeline parallelism each rank holds a
+    different slice of the model, so there is no rank that can write the others.
+    """
+
+    state = trainer.stage_state()
+    if trainer.world_size > 1:
+        # Make sure no rank starts reading the directory while another is still
+        # streaming its 16 GB stage file.
+        torch.distributed.barrier()
+    target.mkdir(parents=True, exist_ok=True)
+    destination = target / f"stage{trainer.pp_rank}.pt"
+    torch.save(state, destination)
+    log(
+        f"saved {destination} ({len(state)} tensors, "
+        f"max|w|={max(t.abs().max().item() for t in state.values()):.3f})"
+    )
+    if trainer.world_size > 1:
+        torch.distributed.barrier()
+
+
 def train(config: DictConfig) -> None:
     train_cfg = config.train
     rank, world_size, device, platform = init_distributed(train_cfg.get("hardware", {}))
@@ -685,6 +930,26 @@ def train(config: DictConfig) -> None:
     # an 8B adapter was converted in place).
     hardware_cfg = train_cfg.get("hardware", {})
     parallel_mode = str(train_cfg.get("parallel", hardware_cfg.get("parallel", "ddp"))).lower()
+    if parallel_mode == "megatron":
+        # Pipeline parallelism owns the whole forward/backward and optimizer
+        # path, so it handles the run end to end rather than dropping back into
+        # the single-process loop below.  Everything shared -- the query-level
+        # split, the prompt framing, the score tokens, the epoch checkpoint
+        # layout, wandb -- is still resolved from the same config here.
+        return _train_megatron(
+            train_cfg=train_cfg,
+            model_cfg=model_cfg,
+            data_cfg=data_cfg,
+            optim_cfg=optim_cfg,
+            model_type=model_type,
+            task=task,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+            seed=seed,
+            seed_record=seed_record,
+            platform=platform,
+        )
     master_dtype_name = str(train_cfg.get("master_dtype", "bf16")).lower()
     master_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(
         master_dtype_name, torch.bfloat16
