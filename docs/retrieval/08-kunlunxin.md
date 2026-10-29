@@ -13,6 +13,13 @@
 > 0.001 级的差异（原评测按固定 cutoff 统计，重算用了完整候选与 nDCG 增益），
 > **跨平台对比统一以本文档口径为准**。重算不需要重跑模型。
 
+
+> ⚠️ **本文件所有结果均未引入 FlagGems。**
+> `train.hardware.use_flaggems=false`（`conf/train.yaml` 与各平台启动脚本一致），
+> 两个国产平台都走厂商 torch / Torch-FL 的默认算子，**没有挂任何 FlagGems kernel**。
+> 也就是说：下面所有精度与吞吐数字都是**未优化**的基线，
+> 算子级剖析给出的差距正是 FlagGems 要补的部分，尚未生效。
+
 ## 一、达标判定（对照 docx §4）
 
 | 项 | 要求 | 实测 | 判定 |
@@ -237,3 +244,66 @@ FlagGems 的融合 kernel 价值在后者——把 `add + rms_norm`、`silu + mu
 
 > BGE-M3 的 FFN 用的是 GELU（`gelu` 慢 11.9× 正好对应它 45.8% 的吞吐），
 > Qwen3 用 SwiGLU（`silu` 4.0×）。**两家要补的激活算子不是同一个。**
+
+### 这些慢算子在 FlagGems 里有没有？——**有，而且是昆仑芯定制版**
+
+FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yaml`
+里**`kunlunxin` 是官方支持后端**，并且有专门的实现目录：
+
+| 路径 | 内容 |
+|---|---|
+| `runtime/backend/_kunlunxin/ops/` | **622** 个昆仑芯定制算子 |
+| `runtime/backend/_kunlunxin/fused/` | **39** 个融合算子 |
+| `runtime/backend/_kunlunxin/op_black_list.yaml` | 不支持清单——**我们关心的算子都不在里面**（黑名单只有 conv1d/geglu/grouped_topk 等 60 行） |
+| `runtime/backend/_kunlunxin/core_shapes.yaml` / `tune_configs.yaml` | 算子的调优配置 |
+
+逐个核对我们要补的算子：
+
+| 算子 | FlagGems 有 | 昆仑芯定制版 | 融合版 |
+|---|---|---|---|
+| `rms_norm` | ✅ `ops/rms_norm.py`（405 行） | ✅ `_fused_rms_norm.py` | ✅ `fused/add_rms_norm.py`（210 行）<br>✅ `fused/fused_add_rms_norm.py`（149 行） |
+| `gelu` | ✅ `ops/gelu.py`（99 行） | ✅ `_kunlunxin/ops/gelu.py` | ✅ `fused/gelu_and_mul.py`（133 行） |
+| `silu` | ✅ `ops/silu.py`（59 行） | — | ✅ `fused/silu_and_mul.py`（69 行）<br>✅ `fused/swiglu.py`（208 行） |
+| `softmax` | ✅ `ops/softmax.py`（408 行） | — | ✅ `_masked_softmax.py` |
+
+**融合版的额外价值**：`add_rms_norm` 把 residual add 和 RMSNorm 合成一次访存；
+`gelu_and_mul` / `silu_and_mul` 把 SwiGLU 的两次 elementwise 合成一次。
+按 A100 上 elementwise+reduce 占 18% 算，这类融合能再省掉一部分。
+
+### 接入的**真实阻塞点**：昆仑芯缺厂商版 Triton
+
+FlagGems 的昆仑芯后端声明了：
+
+```python
+vendor_info = VendorDescriptor(
+    vendor_name="kunlunxin",
+    triton_extra_name="xpu",   # ← 需要 triton.language.extra.xpu
+    ...
+)
+```
+
+而实测这台机器：
+
+| 项 | 状态 |
+|---|---|
+| `triton` | 3.5.0（**stock PyPI 版**，在 `envs/ads/site-packages`） |
+| `triton.language.extra.xpu` | ❌ **ModuleNotFoundError** |
+| `flag_gems` | ❌ **未安装**（我们一直用 `use_flaggems=false`） |
+
+`_kunlunxin/ops/acos.py` 等多个文件直接 `import triton.language.extra.xpu.libdevice`，
+源码注释也写明"non-kunlunxin platforms … ModuleNotFoundError on vendors without
+the xpu triton extra"。
+
+**所以接过来需要两步，缺一不可**：
+
+1. **拿到昆仑芯的厂商 Triton**（带 `language.extra.xpu`）—— 需向厂商索取，
+   `backends.yaml` 里 `kunlunxin:` 条目写了对应的安装源
+2. `pip install flag_gems` + 设 `GEMS_VENDOR=kunlunxin`，然后关掉
+   `use_flaggems=false`（当前配置里是关闭的）
+
+### 预期收益（按算子占比推算）
+
+GEMM 占 55% 且已比 A100 快，所以剩下 45% 是战场。若把 `rms_norm`（5.9×）、
+`gelu`（11.9×）、`silu`（4.0×）、`softmax`（3.4×）追到 1.5× 以内，
+非 GEMM 部分提速约 **2.9×**，整体吞吐从 45.8% 到 **~80%**。
+**这正好是 docx 的门槛。**

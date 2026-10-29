@@ -13,6 +13,13 @@
 > 0.001 级的差异（原评测按固定 cutoff 统计，重算用了完整候选与 nDCG 增益），
 > **跨平台对比统一以本文档口径为准**。重算不需要重跑模型。
 
+
+> ⚠️ **本文件所有结果均未引入 FlagGems。**
+> `train.hardware.use_flaggems=false`（`conf/train.yaml` 与各平台启动脚本一致），
+> 两个国产平台都走厂商 torch / Torch-FL 的默认算子，**没有挂任何 FlagGems kernel**。
+> 也就是说：下面所有精度与吞吐数字都是**未优化**的基线，
+> 算子级剖析给出的差距正是 FlagGems 要补的部分，尚未生效。
+
 ## 一、达标判定（对照 docx §4）
 
 | 项 | 要求 | 实测 | 判定 |
@@ -209,3 +216,59 @@ FlagGems 的融合 kernel 价值在后者——把 `add + rms_norm`、`silu + mu
 
 > `bmm_scores` 慢 15.3× 与 CLIP 吞吐只有 58.1% 直接相关——CLIP 的对称
 > InfoNCE 要对整 batch 做 `text @ image.T`，正是 bmm。
+
+### 这些慢算子在 FlagGems 里有没有？——**有，PPU 也有专属后端**
+
+FlagGems 的 `backends.yaml` 里 **`thead`（平头哥 PPU）也是官方后端**：
+
+| 路径 | 内容 |
+|---|---|
+| `runtime/backend/_thead/ops/` | **77** 个 PPU 定制算子 |
+| `runtime/backend/_thead/fused/` | 2 个 |
+| `runtime/backend/_thead/mm_ppu_expand.yaml` | 661 行矩阵乘调优展开 |
+| `runtime/backend/_thead/general_ops_thead_expand.yaml` | 通用算子调优参数（block_size / stages / warps 扫描） |
+| `runtime/backend/_thead/tune_configs.yaml` | 调优配置 |
+
+逐个核对：
+
+| 算子 | FlagGems 有 | PPU 定制版 | 融合版 |
+|---|---|---|---|
+| `sum` / 归约 | ✅ `ops/sum.py`（390 行） | — | — |
+| `bmm` | ✅ `ops/bmm.py`（223 行） | ✅ `_thead/ops/bmm.py`<br>✅ `baddbmm.py` | — |
+| `gelu` | ✅ `ops/gelu.py`（99 行） | — | ✅ `fused/gelu_and_mul.py` |
+| `layer_norm` | ✅ `ops/native_layer_norm.py` | — | ✅ `fused/post_layer_norm_residual.py`<br>✅ `fused/skip_layernorm.py` |
+
+**`bmm` 是 PPU 的 P0（慢 15.3×）**，而 `_thead/ops/bmm.py` 是 PPU 专用的实现，
+`mm_ppu_expand.yaml` 里还有 661 行的矩阵乘调优展开——**正是针对这类问题做的**。
+
+### 接入的可行性：比昆仑芯好
+
+FlagGems 的 thead 后端声明：
+
+```python
+vendor_info = VendorDescriptor(
+    vendor_name="thead",
+    device_name="cuda",        # PPU 通过 torch.cuda 访问
+    dispatch_key=None,         # 用标准 CUDA dispatch key
+    device_query_cmd="ppu-smi",
+    tle_enabled=True,
+)
+```
+
+实测这台机器：
+
+| 项 | 状态 |
+|---|---|
+| `triton` | **3.6.0**（厂商版） |
+| `triton.language.extra.cuda` | ✅ **OK** |
+| `flag_gems` | ❌ 未安装 |
+
+**不需要额外的 xpu extra**——PPU 走 CUDA 兼容路径，现有的 triton 就带 `extra.cuda`。
+所以 PPU 的接入只差 **`pip install flag_gems` + `GEMS_VENDOR=thead`**，
+不用等厂商补 Triton。
+
+### 预期收益（按算子占比推算）
+
+CLIP 的 GEMM 占 52%，剩余 48% 里 `bmm` 是核心。若把 `sum`（18.6×）、
+`bmm`（15.3×）、`gelu`（11.2×）、`layer_norm`（7.6×）追到 1.5× 以内，
+非 GEMM 部分提速约 **2.9×**，整体从 58.1% 到 **~80%**，刚好过门槛。
