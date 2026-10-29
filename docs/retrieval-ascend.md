@@ -41,23 +41,35 @@ PLATFORM=ascend ./sync.sh push        # ⚠️ sync.sh 里还没有 ascend，见
    ```
 2. 给 `sync.sh` 加一条 `ascend)` 分支（需要远端路径），之后就能用 `check` 做双向校验。
 
-## 三、环境要求
+## 三、环境要求（2026-10-29 实测）
 
-```bash
-# CANN
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
+真机实测版本，不是猜测值：
 
-# Python 环境里需要：
-python 3.10/3.11
-torch           2.1~2.4（与所装 torch_npu 版本严格匹配）
-torch_npu       ← 关键，device 名是 npu
+```text
+CANN            8.5.0
+python          3.11.14（uv 装的 standalone 构建）
+torch           2.6.0+cpu        ← 注意是 cpu wheel，配 torch_npu 用
+torch_npu       2.6.0.post5
 transformers    4.57.x
-sentence-transformers
-omegaconf hydra-core numpy pyarrow pandas pillow safetensors wandb
+pyarrow         21.0.0           ← 必须钉住
+decorator                        ← CANN 的 GE 编译器设 HF32 时要
 ```
 
-> ⚠️ `torch` 与 `torch_npu` 版本必须严格配套，装错会在 `import torch_npu` 时
-> 报符号缺失。
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+```
+
+> ⚠️ 两个版本坑（都实测踩过）：
+> 1. `torch` 与 `torch_npu` **必须严格配套**（这里是 2.6.0 / 2.6.0.post5），
+>    装错会在 `import torch_npu` 时报符号缺失。
+> 2. **`pyarrow` 必须 21.0.0**。pyarrow 26 要求 NumPy 2，而 FlagScale 钉的是
+>    NumPy 1.26.4，装了会冲突。
+>
+> 一键建环境：`bash examples/retrieval/ascend/setup-ascend-env.sh`（幂等，可重跑）。
+
+> ⚠️ 这套 torch 2.6 比 A100（2.11）和 PPU（2.10）**低两个大版本**。检索代码用的是
+> 标准 API，目前跑通了 bge / clip / reranker 的 FSDP2 路径，但 `transformers` 只能用
+> 4.57 这一档，不能用 A100 上的 5.16。
 
 ## 四、路径（和别的平台同一套约定）
 
@@ -80,32 +92,82 @@ sudo ln -sfn <你的 ckpts 目录>    /flagos-retrieval-ckpts
 
 ```bash
 cd ~/FlagOS/FlagScale
-export FLAGSCALE_PYTHON_ENV=<装了 torch_npu 的环境>
+source examples/retrieval/ascend/ascend-env.sh          # CANN + venv + FS_PLATFORM=npu
 
 # bge_m3 / clip：一卡一个
 bash examples/retrieval/run-ascend.sh bge_m3 0
 bash examples/retrieval/run-ascend.sh clip_vit_large 1
 
-# reranker：两卡 FSDP2（131 GB 优化器状态，单卡放不下）
-bash examples/retrieval/run-ascend.sh qwen3_reranker 0 "0,1"
+# reranker：4 卡 FSDP2（见下面的显存原因）
+bash examples/retrieval/run-ascend.sh qwen3_reranker 0 "0,1,2,3"
 ```
 
 脚本内部等价于：
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 python -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
   action=test train=qwen3_reranker \
   train.parallel=fsdp2 train.master_dtype=fp32 \
-  experiment.runner.nproc_per_node=2 \
+  experiment.runner.nproc_per_node=4 \
   train.hardware.device_type=npu train.hardware.distributed_backend=hccl \
   train.hardware.autocast_device=npu train.hardware.use_flaggems=false \
+  train.batch_size=16 train.gradient_accumulation_steps=1 \
   train.output_dir=<OUT> experiment.exp_dir=<OUT>/logs
 ```
 
-**超参一个都不要写在命令行上**：batch / lr / epochs / max_length / split 全部
-来自 `conf/train/<model>.yaml`（AGENTS.md 第八节）。
+**超参原则上不许写在命令行上**：batch / lr / epochs / max_length / split 全部
+来自 `conf/train/<model>.yaml`（AGENTS.md 第八节）。上面只出现两处例外，
+都是**昇腾实测逼出来的**，已登记在 AGENTS.md 的平台例外表：
+
+| 项 | 共享配置 | 昇腾实测 | 原因 |
+|---|---|---|---|
+| 卡数 | 2 | **4** | 昇腾芯片是 **64 GB**，比 A100(80)/PPU(96) 小 |
+| `batch_size` | 32 | **16**（GA 1） | 4×64 GB 下 batch 32/rank 放不下；**有效 batch 仍是 16×4=64 行/步**，与其他平台一致 |
+
+### 5.1 关键修复：FSDP2 必须先在 CPU 上建模型再搬分片
+
+没有这条，4 卡必 OOM。**每个 rank 都会把完整的 fp32 8B（约 33 GB）先加载进 HBM，
+然后才分片** —— 4 张 64 GB 卡在第一次 all-gather 就全挂。
+
+修复在 `train_retrieval.py` 的 `parallel_mode == "fsdp2"` 分支：
+
+```python
+# 全模型建在 CPU（host RAM 足够），fully_shard 对 CPU module + NPU mesh 是合法的
+model_device = torch.device("cpu") if parallel_mode == "fsdp2" else device
+model, processor = build_retrieval_model(model_type, load_cfg, model_device)
+...
+model = parallel_utils.apply_fsdp2(model, device_type=device.type, ...)
+# 分片后才把「本 rank 的那一片」搬到 NPU，并回收空闲显存
+model.to(device=device, dtype=master_dtype)
+if device.type == "npu":
+    torch.npu.empty_cache()
+```
+
+日志会出现 `NPU memory after FSDP2 move: allocated=… reserved=…`，用来确认只搬了分片。
+
+### 5.2 两个显存相关的环境变量 / 参数
+
+```bash
+# FSDP2 的 all-gather 缓冲很多，关掉碎片化（昇腾支持 expandable_segments，
+# 这点和昆仑芯 P800 相反）
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+# bge 一卡跑 batch 10 × GA 4 时，用梯度检查点压到 18 GB HBM
+# （run-ascend-bge-gc.sh 已内置 +train.model.gradient_checkpointing=true）
+```
+
+### 5.3 现成的辅助脚本（`examples/retrieval/ascend/`）
+
+| 脚本 | 用途 |
+|---|---|
+| `ascend-env.sh` | `source` 用：CANN + venv + `FS_PLATFORM=npu` |
+| `setup-ascend-env.sh` | 幂等建 venv（torch 2.6.0+cpu / torch_npu 2.6.0.post5 / pyarrow 21.0.0） |
+| `run-ascend-bge-gc.sh` | 单卡 BGE + 梯度检查点（batch 10 / GA 4） |
+| `run-ascend-reranker-4card-bs16.sh` | 4 卡 FSDP2 reranker（batch 16 × 4 卡 = 64 行/步） |
+| `eval-ascend-mixed-when-done.sh` | 等 `training_complete.json` 出现后跑全量测试集评测（带 `--save-predictions`） |
+| `bench_gemm_npu.py` / `bench_hf32_npu.py` / `test_fp64_npu.py` | 硬件能力探测（FP32/FP16/BF16、HF32、FP64） |
 
 ## 六、这次为昇腾改了哪些代码
 
@@ -194,14 +256,48 @@ bash examples/retrieval/evaluate_models.sh
 reranker 记得 `BATCH_SIZE=8`（8B + seq 640 余量小），且 `NUM_NEGATIVES=15`
 （训练是 1，评测要用数据集的 16 候选全集）。
 
-## 九、还没验证的（当成未知，别当结论）
+## 九、验证状态（2026-10-29 真机更新）
 
-1. **coalesced all-gather 在 HCCL 上的类名/行为** —— 代码按 `torch_npu` 的公开
-   路径写，真机可能需要调整。
-2. **FSDP2 在 HCCL 上是否完整可用** —— `init_device_mesh("npu", ...)` 理论上可行，
-   未实测。
-3. **bge_m3 的动态 shape** —— 昆仑芯上踩过「每步重编译」的坑；昇腾若有 graph
-   编译缓存，需要确认 `max_length` 固定后不再重编译。
-4. **混合精度**：`master_dtype=fp32` + bf16 前向在 910B 上是否与 CUDA 数值一致。
-5. **torch_npu 版本的 autocast 设备串**：代码传 `autocast_device=npu`，
-   若该版本不支持会回退成无 autocast（`autocast_context` 里已 try/except 兜底）。
+**已跑通**（昇腾真机，4×64 GB，CANN 8.5.0 / torch 2.6.0+cpu / torch_npu 2.6.0.post5）：
+
+| 项 | 状态 | 备注 |
+|---|---|---|
+| `device_type=npu` 平台识别 | ✅ | `platform_npu.py` 直接可用 |
+| HCCL 集合通信 | ✅ | 4 卡 FSDP2 正常 |
+| coalesced all-gather shim（HCCL） | ✅ | 无需额外修改，`_process_group_classes` 的探测路径在 torch_npu 上生效 |
+| bge_m3 单卡 + 梯度检查点 | ✅ | 18 GB HBM，batch 10 × GA 4 |
+| clip 单卡 | ✅ | 已出 base/trained 评测 |
+| reranker 8B 4 卡 FSDP2 | ✅ | 需 5.1 的 CPU-init 修复；batch 16 × 4 卡 |
+| 混合精度 fp32 master + bf16 前向 | ✅ | 数值可用 |
+
+**仍未验证**：
+
+1. **2 卡能否跑上 reranker** —— 64 GB × 2 = 128 GB，而优化器状态就要 131 GB，
+   `batch_size` 还得降到很小，实际很可能放不下。默认已改 4 卡。
+2. **昇腾与其他平台的指标可比性** —— 配方有 2 处平台例外（4 卡、batch 16），
+   数值上是否严格可比需要实测确认。
+3. **`transformers 5.x`** —— 当前 torch 2.6 只能用 4.57 档，跨平台对比要注明。
+4. **完整 3 epoch 长跑** —— 只验证了链路能跑，未验证收敛行为。
+   注意：A100 与昆仑芯的 reranker 长跑在 3 epoch 内都发散了（见
+   `Notes/reranker-multiplatform-run-2026-10-26.md`），昇腾大概率同样，**不要
+   直接上 3 epoch**。
+
+## 十、代码回传记录（2026-10-29）
+
+昇腾机器只能经堡垒机手动拷贝，所以代码改动靠**打包含并**回本地，不是 `sync.sh`。
+
+回传包内容与处理：
+
+| 包内文件 | 处理 |
+|---|---|
+| `ascend-4card-cpuinit-20261029.patch` | ✅ 已 `git apply`（基线 blob `3831fa6c` 匹配，`--check` 通过） |
+| `FlagScale-files/train_retrieval.py` | ✅ 作为校验基准：应用后与本地逐字节一致（仅注释措辞不同） |
+| `scripts/*` | ✅ 收入 `examples/retrieval/ascend/`，并改为从脚本位置推导路径 |
+| `retrieval-range-a51d3b78..8cf2e4ec.patch` | ⏭️ 跳过：本地已在 `8cf2e4ec`，无需重复应用 |
+| `FlagScale-20261027.diff` / `.status` | ⏭️ 跳过：**全是权限位变化**（100755→100644），零内容变更 |
+| `Torch-FL-20261027.diff` / `.status` | ⏭️ 同上，零内容变更 |
+| `pre-reupload-20261027-2130.tar.gz` | 归档在 `backups/`，未合入 |
+
+> **教训**：`scp`/`rsync -a` 传输后会丢掉可执行位，`git status` 显示几十个
+> `M`，但 `git diff` 里只有 `old mode`/`new mode`。判断这类差异要看
+> `grep -E "^[+-][^+-]"` 是否为空，别按文件个数下结论。

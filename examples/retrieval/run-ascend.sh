@@ -64,13 +64,23 @@ export TORCH_EXTENSIONS_DIR="$OUT/torch_extensions"
 mkdir -p "$OUT" "$LOGS" "$TMPDIR" "$TORCH_EXTENSIONS_DIR"
 
 # Same reasoning as the other runners: the 8B reranker needs 131 GB of optimizer
-# state (8.19B x 16 bytes) and cannot fit one 64 GB NPU, so it shards with FSDP2.
+# state (8.19B x 16 bytes) and cannot fit one NPU, so it shards with FSDP2.
 # bge/clip stay on single-card DDP so their numbers match the existing baselines.
+#
+# 4 cards, not 2: the Ascend chips measured here are 64 GB each, and the
+# config's batch_size 32 per rank does not fit (fp32 master + AdamW + the
+# all-gather buffers). Measured on 4x64GB: batch 16/rank works, 32 does not.
+# Both numbers are Ascend-only deviations from the shared config -- see the
+# platform-exception table in AGENTS.md section 8.
 PARALLEL=ddp
 NPROC=1
+EXTRA_ARGS=()
 if [ "${model}" = "qwen3_reranker" ]; then
   PARALLEL=fsdp2
-  NPROC=${RERANKER_CARDS:-2}
+  NPROC=${RERANKER_CARDS:-4}
+  # Effective batch stays 64 rows/step (16 x 4 cards x GA 1), matching the
+  # A100/PPU/Kunlunxin runs; only the per-rank split differs.
+  EXTRA_ARGS+=("train.batch_size=${RERANKER_BATCH:-16}" "train.gradient_accumulation_steps=1")
 fi
 
 echo "===== $model cards=$card_list parallel=$PARALLEL nproc=$NPROC start $(date '+%F %T') ====="
@@ -81,6 +91,7 @@ echo "===== $model cards=$card_list parallel=$PARALLEL nproc=$NPROC start $(date
   experiment.runner.nproc_per_node="$NPROC" \
   train.hardware.device_type=npu train.hardware.distributed_backend=hccl \
   train.hardware.autocast_device=npu train.hardware.use_flaggems=false \
+  "${EXTRA_ARGS[@]}" \
   train.output_dir="$OUT" experiment.exp_dir="$LOGS" \
   hydra.run.dir="$LOGS/hydra" \
   2>&1 | tee "$LOGS/train-$model.log"

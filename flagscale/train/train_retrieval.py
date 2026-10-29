@@ -694,7 +694,19 @@ def train(config: DictConfig) -> None:
         load_cfg = OmegaConf.create(OmegaConf.to_container(model_cfg, resolve=True))
         load_cfg.torch_dtype = master_dtype_name
         log(f"loading weights directly in master dtype {master_dtype_name}")
-    model, processor = build_retrieval_model(model_type, load_cfg, device)
+
+    # FSDP2: build the full model in host RAM, shard it, then move only this
+    # rank's slice to the device.  Loading the unsharded 8B model in fp32 on
+    # every rank costs ~33 GB of HBM before sharding; on a 64 GB Ascend chip
+    # that leaves no room for the sharded state and the first all-gather (4-card
+    # reranker OOMed on the old path).  Host RAM is ample, and `fully_shard`
+    # accepts a CPU module against an accelerator mesh.
+    #
+    # Applies to every FSDP2 run, not just NPU: it lowers peak device memory
+    # everywhere.  A100/PPU were validated on the load-straight-to-device path,
+    # so re-check them before trusting a new FSDP2 result from here.
+    model_device = torch.device("cpu") if parallel_mode == "fsdp2" else device
+    model, processor = build_retrieval_model(model_type, load_cfg, model_device)
     if bool(model_cfg.get("gradient_checkpointing", False)):
         if unwrap_model(model).enable_gradient_checkpointing():
             log("gradient checkpointing enabled")
@@ -738,6 +750,17 @@ def train(config: DictConfig) -> None:
             reduce_dtype=compute_dtype,
             log=log,
         )
+        # Only the local shard is copied to the NPU; the full CPU copy can now
+        # be released by the allocator.
+        model.to(device=device, dtype=master_dtype)
+        if device.type == "npu":
+            torch.npu.empty_cache()
+            log(
+                "NPU memory after FSDP2 move: "
+                f"allocated={torch.npu.memory_allocated() / 2**30:.1f} GiB, "
+                f"reserved={torch.npu.memory_reserved() / 2**30:.1f} GiB"
+            )
+        log(f"moved FSDP2 shards to {device} in master dtype {master_dtype_name}")
     elif world_size > 1:
         # NCCL- and HCCL-backed replicas register their params on the process's
         # current device, so DDP wants that index spelled out; the flagos
