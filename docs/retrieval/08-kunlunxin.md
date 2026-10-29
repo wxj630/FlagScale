@@ -274,59 +274,98 @@ FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yam
 `gelu_and_mul` / `silu_and_mul` 把 SwiGLU 的两次 elementwise 合成一次。
 按 A100 上 elementwise+reduce 占 18% 算，这类融合能再省掉一部分。
 
-### 接入的可行性：**厂商版 Triton 现成可取，只差装**
+### 接入实测：装上了，**但 FlagGems 在昆仑芯上全面更慢**
 
-FlagGems 的昆仑芯后端声明了 `triton_extra_name="xpu"`，也就是需要带
-`triton.language.extra.xpu` 的厂商 Triton。**实测该版本在 FlagOS 的厂商
-PyPI 仓库里可以直接下载**：
+这是本轮最重要的一条负面结果。装和调都通了，实测却没有一处变快。
 
-```bash
-pip index versions triton \
-  --index-url https://resource.flagos.net/repository/flagos-pypi-kunlunxin/simple
-# Available: 3.6.0+gitcd2d6c1b, 3.5.0, 3.0.0+a48aedef, 3.0.0+0762702f
-```
+#### 安装与注册：全部成功
 
-`3.6.0+gitcd2d6c1b` 正是 `backends.yaml` 为 `kunlunxin` 指定的版本：
+在独立 venv（`venv --system-site-packages` 继承 `ads`，不污染现有环境）：
 
-```yaml
-kunlunxin:
-  python: "3.10"
-  triton: triton==3.6.0+gitcd2d6c1b
-  flagtree: flagtree==0.7.0+xpu3.6
-```
-
-已实测下载并检查 wheel 内容（1.7 GB）：
-
-| 项 | 结果 |
+| 步骤 | 结果 |
 |---|---|
-| 下载 | ✅ 成功（`triton-3.6.0+gitcd2d6c1b-cp310-cp310-linux_x86_64.whl`） |
-| `triton/language/extra/xpu/` | ✅ **存在**（`__init__.py` + `libdevice.py`） |
-| `triton/backends/xpu/` | ✅ **561 个条目**（compiler / driver / C 源码） |
-| `libtriton.so` | ✅ 1 个 |
+| 厂商仓库 | ✅ `resource.flagos.net/repository/flagos-pypi-kunlunxin` 有 `triton==3.6.0+gitcd2d6c1b`（`backends.yaml` 指定版本） |
+| wheel 内容 | ✅ 1.7 GB；`language/extra/xpu/libdevice.py` + `backends/xpu/`（561 条目） |
+| triton 3.6.0 | ✅ 与 torch 2.9.0+cu128 共存 |
+| flag_gems 5.4.0 | ✅ import + `use_gems()` 均成功 |
+| 算子注册 | ✅ `rms_norm/gelu/silu/softmax/sum/bmm/layer_norm` 全部存在 |
+| 黑名单 | ✅ 都不在 `op_black_list.yaml`（13 个名字里没有它们） |
 
-> **更正**：本文件早前写「昆仑芯缺厂商 Triton、需要向厂商索取」，
-> 那是把"当前 venv 里装的是 stock 3.5.0"误说成"厂商没有提供"。
-> 厂商仓库里就有，只是我们没装。
+#### 实测对比（同一进程、同形状、`with flag_gems.use_gems()`）
 
-### 所以接入步骤是
+batch 8 × seq 512 × hidden 1024，bf16，中位数 60 次。
 
-1. `pip install "triton==3.6.0+gitcd2d6c1b" --index-url
-   https://resource.flagos.net/repository/flagos-pypi-kunlunxin/simple`
-   （当前是 stock 3.5.0，在 `envs/ads/site-packages`）
-2. `pip install flag_gems`（同样从厂商 index）
-3. 启动脚本设 `GEMS_VENDOR=kunlunxin`，并把 `use_flaggems` 从 `false` 改 `true`
+| 算子 | 原生 | FlagGems | 倍数 |
+|---|---|---|---|
+| `gelu` | 0.247 ms | 0.242 ms | 1.02× |
+| `bmm` | 0.077 | 0.148 | **0.52×** |
+| `silu` | 0.081 | 0.206 | **0.39×** |
+| `rms_norm` | 0.130 | 0.341 | **0.38×** |
+| `softmax` | 0.086 | 0.268 | **0.32×** |
+| `mul` | 0.030 | 0.098 | **0.31×** |
+| `silu_and_mul` | 0.129 | 0.482 | **0.27×** |
+| `add` | 0.031 | 0.166 | **0.18×** |
+| `layer_norm` | 0.038 | 0.985 | **0.04×** |
+| `sum_last` | 0.022 | 0.809 | **0.03×** |
 
-**风险**：升级 triton 会影响现有的 2.9.0+cu128 环境，需要先验证 XPytorch
-仍能加载（`import torch` 走 `xpytorch_import_hook`，它 hook 了 triton 的一部分路径）。
-建议在独立 venv 或容器副本里做，不要直接动正在跑实验的环境。
+**10 个算子里 9 个变慢，最差的 `sum` 慢 37 倍、`layer_norm` 慢 26 倍。**
+唯一的 `gelu`（1.02×）也只是持平。
+
+#### 为什么会这样
+
+`flag_gems` 的 kernel 是 **Triton 生成**的，而厂商 torch 的原生实现已经在用
+XMLIR/XBLAS 的融合内核。在昆仑芯上：
+
+- **原生的 elementwise/reduction 已经是高度优化过的**（`sum` 0.022 ms、
+  `add` 0.031 ms），Triton 生成的版本先要付出 launcher + 显存往返的开销，
+  小 shape 下完全不划算
+- 之前微基准里 A100 的 `sum_last` 是 0.019 ms、昆仑芯 0.022 ms —— **两家本来就
+  在同一水平**，说明这个算子不需要优化（我早前把 PPU 的 18.6× 当成了昆仑芯的问题）
+
+#### 修正一个早前的判断错误
+
+早前文档写「`sum` 在 PPU 慢 18.6×」，但**昆仑芯的 `sum` 只慢 1.3×**。
+两个平台不能混谈；而且 FlagGems 的 `sum` 在昆仑芯上更慢 37 倍，
+说明它不是"缺优化"，而是"不该换"。
+
+#### 三个必须记录的环境坑
+
+1. **`use_gems` 是上下文管理器，不是函数**。`flag_gems.use_gems()` 只构造对象、
+   不执行 `__enter__`，**什么都不会注册**。本轮前几次测出"耗时完全没变"
+   就是因为这个——必须 `with flag_gems.use_gems():`。
+2. **`use_gems()` 必须在 `torch.cuda` 初始化之后**。顺序反了报
+   `RuntimeError: NVIDIA driver too old (found version 10020)`。
+3. **厂商 triton 驱动硬编码写 `/tmp`**（`backends/xpu/driver.py:80,85,817`），
+   根分区 0 字节 → `OSError: No space left`。需 `mount --bind` 数据盘到 `/tmp`。
+   FlagGems 自己还要 `FLAGGEMS_CACHE_DIR`（默认 `~/.flaggems`，也在根分区）。
+
+#### 下一步该做什么
+
+**放弃在昆仑芯上整体替换算子，改为定点验证。**
+
+- `gelu` 是唯一不亏的（1.02×），但也没赚——不值得为它引入 FlagGems
+- 真正的瓶颈可能不在这些 elementwise 算子，而在 **`mm_ffn`（1.8×）和
+  `flash_attn`（1.5×）**，这两个 FlagGems 不覆盖（走的是 XBLAS / 厂商 flash attention）
+- 昆仑芯 BGE 需要 2.31× 提速，靠换 elementwise kernel 是做不到的
 
 
-### 预期收益（按算子占比推算）
+### 为什么"换 kernel"这条路走不通
 
-GEMM 占 55% 且已比 A100 快，所以剩下 45% 是战场。若把 `rms_norm`（5.9×）、
-`gelu`（11.9×）、`silu`（4.0×）、`softmax`（3.4×）追到 1.5× 以内，
-非 GEMM 部分提速约 **2.9×**，整体吞吐从 45.8% 到 **~80%**。
-**这正好是 docx 的门槛。**
+算一下就知道：即使把 `rms_norm`/`gelu`/`silu`/`softmax` 全部追到 A100 水平，
+按 A100 上的算子占比（这些合计约 18%），整体提速上限约 **1.1×**——
+离 BGE 需要的 **2.31×** 差得很远。
+
+昆仑芯 BGE 的差距不在 elementwise，而在：
+
+| 算子 | 昆仑芯 vs A100 | A100 上占比 |
+|---|---|---|
+| `flash_attn_fwd` | **1.5×** | ~12% |
+| `mm_ffn` | 1.8× | 大 GEMM 的一部分 |
+| `rms_norm` | 5.9× | 小 |
+
+而且实测 FlagGems 这些 kernel 在昆仑芯上**比原生还慢**（见上），
+所以这条路不仅上限低，方向也不对。真要提速 2.31×，得从
+**厂商 XBLAS / flash attention 的内部实现**入手，那是厂商侧的工作。
 
 ### 附：fp32 GEMM 与折扣系数
 

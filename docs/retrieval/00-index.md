@@ -23,9 +23,16 @@
 
 > 07-09 每份都含：训练耗时、吞吐（含最快/最慢/平均）、完整检索指标（含 nDCG）、
 > docx §4 达标判定、**算子级剖析**（哪些算子拖慢、FlagGems 里有没有实现、
-> 怎么接入）。两家都能接 FlagGems：昆仑芯的厂商 Triton（`3.6.0+gitcd2d6c1b`，
-> 带 `language/extra/xpu`）在 FlagOS 厂商仓库可下载，PPU 的 triton 3.6.0 已带
-> `extra.cuda`。**都还没装**，所以上面的数字仍是未优化基线。
+> 怎么接入）。
+>
+> **FlagGems 现状（实测）**：
+> - 昆仑芯：厂商 Triton（`3.6.0+gitcd2d6c1b`，带 `language/extra/xpu`）可从
+>   FlagOS 厂商仓库装，flag_gems 也能装；但**实测 10 个算子里 9 个比原生更慢**
+>   （`sum` 慢 37×、`layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
+> - PPU：还没试。
+>
+> 所以上面的吞吐数字仍是**未优化基线**，且"靠 FlagGems 补齐"这个假设已被昆仑芯
+> 的实测否定。
 >
 > **全部结果均未引入 FlagGems**（`use_flaggems=false`），属未优化基线。
 
