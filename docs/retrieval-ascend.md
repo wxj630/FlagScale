@@ -175,6 +175,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 |---|---|---|
 | `flagscale/train/utils/parallel.py` | `install_coalesced_allgather_shim` 从只补 `ProcessGroupNCCL` 改成遍历所有可导入的后端类（NCCL / **HCCL** / Gloo） | 昇腾上根本没有 `ProcessGroupNCCL`，原来的实现会直接 `return False`，FSDP2 起不来 |
 | 同上 | 把内嵌的 fallback 提到模块级 `_allgather_into_tensor_coalesced` | 多个类共用一个实现 |
+| 同上 | `ProcessGroupHCCL` 用**属性探测**而非单一 `from torch_npu._C._distributed_c10d import ...` | `torch_npu` 各版本把该类放在不同路径（`torch_npu._C._distributed_c10d` / `torch.distributed.distributed_c10d` / `torch._C._distributed_c10d` 都出现过） |
 | `flagscale/train/train_retrieval.py` | `init_distributed` 的设备校验：`elif requested not in {...}` 改成显式 `cuda` 分支 + 通用 `else` 分支 | 原来 `npu` 会走进「unavailable」分支报错 |
 | 同上 | DDP `device_ids`：`platform.name() in {"cuda","npu","musa"}` | torch_npu 不接受 `device_ids=None` |
 | 同上 | `seed_everything` 里 cuDNN 开关加 `hasattr` 保护 | 昇腾没有 cuDNN |
