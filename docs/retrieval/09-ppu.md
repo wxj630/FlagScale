@@ -356,3 +356,22 @@ CLIP 的 GEMM 占 52%，剩余 48% 里 `bmm` 是核心。若把 `sum`（18.6×�
 > 注：PPU 的折扣系数是 0.711（比昆仑芯的 1.321 低），门槛更松，
 > 所以即使慢 4.39×，CLIP 与 reranker 仍然达标、BGE 只差 0.18%
 > （见 `10-microbench-discount.md`）。
+
+### 一个查证过的否定项：`mm_ppu_expand.yaml` 帮不上忙
+
+FlagGems 的 `_thead/mm_ppu_expand.yaml` 有 **661 行**矩阵乘调优参数，
+按形状分了 18 组（`mm_ppu` / `mm_ppu_small_m` / `mm_ppu_narrow_n` /
+`bmm_ppu` / `gemv_ppu` / `mm_ppu_split_k` ...），看起来正对着 PPU 的小 GEMM 问题。
+
+**但它对原生 `aten::mm` 无效。** 这些是 FlagGems **自己 Triton kernel** 的
+`BLOCK_M/BLOCK_N/BLOCK_K/num_warps/num_stages` 调参，只在
+`with flag_gems.use_gems():` 里替换掉原生实现后才生效。
+
+而实测：
+
+| 事实 | 结果 |
+|---|---|
+| FlagGems 的 `mm` 在昆仑芯上 | 0.52× （微基准）/ 未测 PPU |
+| PPU 真实 step 的 `mm` 调优 | ❌ 走的是 `gemm_ktype0_aiu1_...`，厂商 XBLAS 内核 |
+
+所以 **PPU 的小 GEMM 问题只能靠厂商 XBLAS 解决**，改 FlagGems 的 yaml 没有用。

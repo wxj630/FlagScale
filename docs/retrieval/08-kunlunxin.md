@@ -439,3 +439,22 @@ XMLIR/XBLAS 的融合内核。在昆仑芯上：
 前向/反向的 GEMM 仍是 bf16。
 
 这对昆仑芯有利：P800 的 bf16 算力相对 A100 的比值，比 fp32（CUDA core）好看得多。
+
+### 查证：`gelu` 的 bf16 低精度开关 —— 没找到
+
+`gelu_bwd_highprecision`（24.12 ms）+ `gelu_highprecision_nv`（14.38 ms）
+合计 38.51 ms，占 BGE 真实 step 的 22%。名字里的 "highprecision" 暗示是 fp32 路径。
+
+查了这台机器上所有与精度相关的厂商环境变量：
+
+```
+XBLAS_JITC_CACHE_PATH=.../cache/xblas      # JIT 缓存位置，不是精度开关
+XPU_CARD / XPU_VISIBLE_DEVICES             # 卡选择
+```
+
+**没有发现控制 gelu 精度的环境变量**（也没有 `XMLIR_*PRECISION*` 之类）。
+这条需要向厂商确认：
+1. 是否有 bf16 的 gelu 反向实现可选
+2. 如果有，怎么打开
+
+在此之前这条 22% 的优化空间只能挂起。
