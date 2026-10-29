@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -52,6 +53,17 @@ from flagscale.train.losses.retrieval import embedding_batch, move_features, rer
 
 
 def rank_metrics(ranks: list[int], ks: tuple[int, ...] = (1, 5, 10)) -> dict[str, float]:
+    """Recall@k, MRR, mean rank and nDCG@k.
+
+    nDCG@k is not optional: it is the *primary* metric in both M3-Embedding
+    (MIRACL, MLDR, NarrativeQA) and the Qwen3 embedding/reranker reports
+    (MTEB-R, CMTEB-R, MMTEB-R, MLDR, MTEB-Code, FollowIR).  Reporting only
+    recall/MRR made every number incomparable with the papers, and nDCG cannot
+    be derived from a rank alone unless there is exactly one relevant
+    document per query -- which is the case here (ground truth is index 0), so
+    the gain is 1 for the relevant item and 0 otherwise.
+    """
+
     if not ranks:
         raise RuntimeError("No queries were evaluated")
     total = len(ranks)
@@ -60,6 +72,17 @@ def rank_metrics(ranks: list[int], ks: tuple[int, ...] = (1, 5, 10)) -> dict[str
         metrics[f"recall@{k}"] = sum(1 for rank in ranks if rank <= k) / total
     metrics["mrr"] = sum(1.0 / rank for rank in ranks) / total
     metrics["mean_rank"] = sum(ranks) / total
+    # Single relevant document at position `rank` -> DCG = 1/log2(rank+1),
+    # IDCG = 1 (it belongs at position 1), so nDCG@k is that gain truncated at k.
+    for k in ks:
+        metrics[f"ndcg@{k}"] = sum(
+            1.0 / math.log2(rank + 1) if rank <= k else 0.0 for rank in ranks
+        ) / total
+    # Hit@k is what several recommender baselines report (SASRec: HR@10) and
+    # equals recall@k for one relevant doc; kept as a separate key so a report
+    # can name the metric the baseline used.
+    for k in ks:
+        metrics[f"hit@{k}"] = metrics[f"recall@{k}"]
     return metrics
 
 
@@ -525,7 +548,12 @@ def main() -> None:
     ranks, predictions = evaluate_ranked(
         model, rows, args.task, device, args.batch_size, negative_keys
     )
-    metrics = rank_metrics(ranks, (1, 5, 10))
+    # 20 is included because the recommender baselines in the evaluation
+    # spreadsheet report Recall@20 / NDCG@20 (LightGCN), and 100 because
+    # M3-Embedding reports Recall@100 for MKQA.  A 16-candidate pool caps at
+    # rank 16, so recall@20/100 there equal recall@16 -- reported anyway so a
+    # reader comparing against the paper sees the number rather than a gap.
+    metrics = rank_metrics(ranks, (1, 5, 10, 20))
     metrics["num_negatives"] = len(negative_keys)
 
     result = {

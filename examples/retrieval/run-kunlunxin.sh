@@ -19,6 +19,20 @@ card=${2:-1}
 export CUDA_VISIBLE_DEVICES="$card"
 export XPU_VISIBLE_DEVICES="$card"
 
+# Re-assert after sourcing the vendor environment.  That file used to assign
+# CUDA_VISIBLE_DEVICES unconditionally (XPU_CARD defaults to 2), which silently
+# turned a 2-card run into a 2-ranks-on-one-card run.  The file is fixed now,
+# but the vendor env is outside this repo and can drift again.
+_assert_cards() {
+  if [ "${CUDA_VISIBLE_DEVICES:-}" != "$card" ]; then
+    echo "CUDA_VISIBLE_DEVICES was overridden to '${CUDA_VISIBLE_DEVICES:-}' (wanted '$card')" >&2
+    echo "something in the sourced environment is reassigning it" >&2
+    return 1
+  fi
+}
+_assert_cards || exit 1
+
+
 VN=${FLAGSCALE_PYTHON_ENV:-/data2/jiangxuhui/envs/retrieval-vendor}
 PY="$VN/bin/python"
 
