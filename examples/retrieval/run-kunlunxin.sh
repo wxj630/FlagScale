@@ -22,6 +22,11 @@ export XPU_VISIBLE_DEVICES="$card"
 VN=${FLAGSCALE_PYTHON_ENV:-/data2/jiangxuhui/envs/retrieval-vendor}
 PY="$VN/bin/python"
 
+# Megatron-LM-FL is not installed as a package on these hosts; it is a git clone
+# that the trainer imports as `megatron.core`.  Point PYTHONPATH at it only for
+# the megatron backend so the ddp/fsdp2 runs keep their original import set.
+MEGATRON_HOME=${FLAGSCALE_MEGATRON_HOME:-/data2/jiangxuhui/megatron-reranker/Megatron-LM-FL}
+
 # Outputs and scratch on the data disk: the host / is 100% full and anything
 # written under it fails with ENOSPC mid-run.
 OUT=/data2/jiangxuhui/flagos-retrieval-ckpts/${model}
@@ -65,6 +70,12 @@ if [ "$model" = "qwen3_reranker" ]; then
     "train.stage_dir=$STAGE_DIR"
     "train.skip_nonfinite=true"
   )
+  if [ ! -d "$MEGATRON_HOME/megatron/core" ]; then
+    echo "missing megatron.core under $MEGATRON_HOME" >&2
+    echo "set FLAGSCALE_MEGATRON_HOME to your Megatron-LM-FL clone" >&2
+    exit 1
+  fi
+  export PYTHONPATH="$MEGATRON_HOME:$ROOT:${PYTHONPATH:-}"
 fi
 
 $PY -m flagscale.run \

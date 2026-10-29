@@ -80,6 +80,12 @@ train:
   attention_backend: ${oc.env:FLAGSCALE_ATTN_BACKEND,flash}
   skip_nonfinite: ${oc.env:FLAGSCALE_SKIP_NONFINITE,false}
 
+  # Write a checkpoint at every epoch boundary.  These runs take hours to days
+  # and used to keep only the final one, so a crash (or a run that goes bad late)
+  # cost everything.  `parallel=megatron` additionally keeps a separate
+  # `checkpoint-best` when validation improves.
+  save_every_epoch: ${oc.env:FLAGSCALE_SAVE_EVERY_EPOCH,true}
+
   # Dtype the optimizer operates on. `bf16` matches the historical runs, where
   # the moments are bf16 too -- with a 1e-5 learning rate that update is below
   # bf16's 2^-8 resolution and gets rounded away. `fp32` keeps the update and

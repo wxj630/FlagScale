@@ -726,6 +726,25 @@ def _train_megatron(
 
     batch_rows = int(train_cfg.get("batch_size", 1))
     grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
+
+    # `batch_size` is the rows per optimizer step, matching the ddp/fsdp2
+    # backends where the loader yields exactly that many.  For pipeline
+    # parallelism it has to be split across micro-batches: the schedule caps how
+    # many sequences a single forward may hold, and on P800 one row is already
+    # 2 sequences (1 positive + N negatives).  Putting the whole step into one
+    # micro-batch is what OOMed at 90.8 GiB of 96 GiB.
+    #
+    # `micro_batch_rows` overrides the split when the card cannot even hold the
+    # default (one row).
+    micro_batch_rows = int(
+        train_cfg.get("micro_batch_rows") or max(1, min(batch_rows, 1))
+    )
+    if batch_rows % micro_batch_rows != 0:
+        raise ValueError(
+            f"batch_size({batch_rows}) must be divisible by "
+            f"micro_batch_rows({micro_batch_rows})"
+        )
+    num_microbatches = (batch_rows // micro_batch_rows) * grad_accum
     epochs = int(train_cfg.get("epochs", 3))
     log_every = int(train_cfg.get("log_every", 1))
     save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
@@ -738,8 +757,8 @@ def _train_megatron(
         stage_dir=stage_dir,
         pp=pp,
         tp=tp,
-        micro_batch_rows=batch_rows,
-        grad_accum=grad_accum,
+        micro_batch_rows=micro_batch_rows,
+        grad_accum=num_microbatches,
         max_length=max_length,
         pairs_per_row=1 + num_negatives,
         score_token_ids=score_ids,
@@ -775,12 +794,13 @@ def _train_megatron(
     train_rows_total = count_split_rows(
         data_path, "train", split_modulo=split_modulo, log=log
     )
-    rows_per_step = batch_rows * (1 + num_negatives) * grad_accum
+    rows_per_step = batch_rows * (1 + num_negatives)
     steps_per_epoch = max(1, train_rows_total // rows_per_step)
     total_steps = steps_per_epoch * epochs
     log(
         f"megatron plan: {train_rows_total} train rows, {steps_per_epoch} steps/epoch, "
-        f"{total_steps} total over {epochs} epoch(s), pp={pp} tp={tp}"
+        f"{total_steps} total over {epochs} epoch(s), pp={pp} tp={tp}, "
+        f"{batch_rows} rows/step = {micro_batch_rows} rows x {num_microbatches} microbatches"
     )
     trainer.reanchor_schedule(total_steps)
 

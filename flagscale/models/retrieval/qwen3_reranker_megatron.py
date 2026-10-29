@@ -279,7 +279,16 @@ def megatron_to_hf_state(
 
 
 def load_stage_weights(model, stage_file: Path, pp_rank: int) -> int:
-    """Load one stage's converted weights; returns the tensor count."""
+    """Load one stage's converted weights; returns the tensor count.
+
+    The stage file is fp32 (converted from the HF checkpoint) while the module is
+    built in ``params_dtype`` (bf16).  Each tensor is cast to the target
+    parameter's dtype before assignment, so no fp32 copy reaches the device.
+    Calling ``load_state_dict({**model.state_dict(), **weights})`` instead --
+    the previous form -- built a second CPU dict and silently replaced bf16
+    parameters with fp32 ones, doubling the resident size and OOMing a 96 GB
+    card while allocating DDP's gradient buffer.
+    """
 
     if not stage_file.is_file():
         raise FileNotFoundError(
@@ -287,14 +296,27 @@ def load_stage_weights(model, stage_file: Path, pp_rank: int) -> int:
             "`python -m flagscale.models.retrieval.qwen3_reranker_megatron convert`"
         )
     weights = torch.load(stage_file, map_location="cpu")
-    own = {k: v for k, v in model.state_dict().items() if k in weights}
-    missing = set(weights) - set(own)
-    if missing:
+    own = dict(model.state_dict())
+    unknown = set(weights) - set(own)
+    if unknown:
         raise RuntimeError(
-            f"stage{pp_rank}: converter produced unknown tensors: {sorted(missing)[:5]}"
+            f"stage{pp_rank}: converter produced unknown tensors: {sorted(unknown)[:5]}"
         )
-    model.load_state_dict({**model.state_dict(), **weights}, strict=False)
-    return len(weights)
+
+    converted = {
+        name: tensor.to(dtype=own[name].dtype).contiguous()
+        for name, tensor in weights.items()
+    }
+    model.load_state_dict(converted, strict=False)
+    # Release the fp32 source tensors before the caller moves the module to the
+    # device: `weights` holds a full fp32 stage (16 GB for 4B params) and
+    # `converted` holds the bf16 copy, so keeping both alive while the module is
+    # also on the accelerator is what left only 7 GiB free for DDP's buffers.
+    count = len(converted)
+    del converted
+    del weights
+    del own
+    return count
 
 
 __all__ = [

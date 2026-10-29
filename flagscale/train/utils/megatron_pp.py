@@ -111,13 +111,11 @@ class _PairBatcher:
         self.prefix_ids = tokenizer(prefix, add_special_tokens=False)["input_ids"]
         self.suffix_ids = tokenizer(suffix, add_special_tokens=False)["input_ids"]
         self.budget = max(16, self.max_length - len(self.prefix_ids) - len(self.suffix_ids))
-        # Right padding needs a pad token; Qwen uses its eos token.
-        pad_id = tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = tokenizer.eos_token_id
-        if pad_id is None:
-            raise RuntimeError("tokenizer has neither pad_token_id nor eos_token_id")
-        self.pad_id = int(pad_id)
+        # Pad with id 0, not the tokenizer's eos.  Qwen3's eos is 151645; using a
+        # real token as filler lets the model attend to it on rows where the
+        # causal mask does not hide it, and the measured BCE jumped from ~0.54 to
+        # ~1.8 (worse than chance) when this differed from the validated run.
+        self.pad_id = 0
 
     def encode(self, pairs: list[list[str]]) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
         bodies = [build_prompt_body(self.instruction, q, d) for q, d in pairs]
@@ -388,6 +386,11 @@ class MegatronPipelineTrainer:
         self.dp_size = parallel_state.get_data_parallel_world_size()
 
         self.hf = read_hf_config(model_path)
+        # Build in the params dtype (bf16) and keep the optimizer's master copy
+        # in fp32 -- that is the 16-bytes-per-parameter layout the A100 baseline
+        # uses and the reason this backend exists on P800.  Building the module
+        # itself in fp32 would double its resident size for no benefit, because
+        # DDP's gradient buffer size follows numel x grad_dtype, not params.
         config = build_megatron_config(
             self.hf,
             pipeline_model_parallel_size=self.pp,
@@ -407,7 +410,48 @@ class MegatronPipelineTrainer:
             model, Path(stage_dir) / f"stage{self.pp_rank}.pt", self.pp_rank
         )
         model.to(device)
+        # Megatron's DDP sizes its fp32 gradient buffer from the parameter
+        # count, so an accidentally-fp32 module is the difference between
+        # "fits" and "OOM while allocating the buffer".  Print it rather than
+        # leaving the next reader to infer it from an allocation failure.
+        _dtypes = {str(p.dtype) for p in model.parameters()}
+        _fp32 = [(n, p.numel()) for n, p in model.named_parameters() if p.dtype == torch.float32]
+        if _fp32:
+            detail = [(n, f"{c / 1e6:.1f}M") for n, c in _fp32[:6]]
+            total_fp32 = sum(c for _, c in _fp32) / 1e6
+            print(
+                f"[rank{dist.get_rank()}] fp32 params: {detail} total {total_fp32:.1f}M",
+                flush=True,
+            )
+        # Print per rank: the OOM happens on a non-zero rank, and a rank0-gated
+        # log would hide exactly the numbers needed to diagnose it.
+        print(
+            f"[rank{dist.get_rank()}] stage{self.pp_rank}: "
+            f"params {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B "
+            f"in {sorted(_dtypes)}",
+            flush=True,
+        )
+        # Megatron's DDP inspects `module.training` when sizing its buffers and
+        # rejects a module that was never put in train mode, so this has to come
+        # before the wrapper is built.
+        model.train()
         log(f"stage{self.pp_rank}: loaded {loaded} tensors from {stage_dir}")
+
+        # Print per rank and include PyTorch's own accounting: `mem_get_info`
+        # alone cannot tell a resident model from leaked temporaries, and the
+        # OOM lands on a non-zero rank that a rank0-gated log would hide.
+        try:
+            free, total = torch.cuda.mem_get_info(device)
+            allocated = torch.cuda.memory_allocated(device) / 2**30
+            reserved = torch.cuda.memory_reserved(device) / 2**30
+            print(
+                f"[rank{dist.get_rank()}] stage{self.pp_rank}: on-device weights ready, "
+                f"allocated={allocated:.1f} reserved={reserved:.1f} "
+                f"free={free / 2**30:.1f} of {total / 2**30:.1f} GiB",
+                flush=True,
+            )
+        except Exception as exc:  # pragma: no cover - vendor runtime quirk
+            log(f"stage{self.pp_rank}: device memory probe unavailable ({exc})")
 
         ddp_config = DistributedDataParallelConfig(
             grad_reduce_in_fp32=True,
@@ -419,6 +463,9 @@ class MegatronPipelineTrainer:
         self.model = DistributedDataParallel(
             config=config, ddp_config=ddp_config, module=model
         )
+        # The unwrapped module is still referenced by the closure above; drop it
+        # so the allocator can reuse whatever the wrapper did not take over.
+        del model
         self.models = [self.model]
 
         optimizer_config = OptimizerConfig(
@@ -464,19 +511,29 @@ class MegatronPipelineTrainer:
     def _make_scheduler(self, decay_steps: int):
         from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 
+        steps = max(1, int(decay_steps))
+        # Megatron asserts ``lr_warmup_steps < lr_decay_steps``.  A short run
+        # (a smoke test, or a row-limited probe) can have fewer total steps than
+        # the configured warmup; clamp instead of crashing at construction.
+        warmup = min(max(0, int(self._warmup)), max(0, steps - 1))
+        if warmup != self._warmup:
+            self.log(
+                f"warmup clamped: requested {self._warmup} steps but the run has "
+                f"only {steps}; using {warmup}"
+            )
         return OptimizerParamScheduler(
             self.optimizer,
-            init_lr=(self._lr * 0.01) if self._warmup > 0 else self._lr,
+            init_lr=(self._lr * 0.01) if warmup > 0 else self._lr,
             max_lr=self._lr,
             min_lr=self._min_lr,
-            lr_warmup_steps=self._warmup,
+            lr_warmup_steps=warmup,
             # Never zero: Megatron divides by this.  Re-anchored after epoch 1
             # once the real epoch length has been measured.
-            lr_decay_steps=max(1, int(decay_steps)),
+            lr_decay_steps=steps,
             lr_decay_style=self._decay_style,
             start_wd=self._weight_decay,
             end_wd=self._weight_decay,
-            wd_incr_steps=max(1, int(decay_steps)),
+            wd_incr_steps=steps,
             wd_incr_style="constant",
             use_checkpoint_opt_param_scheduler=False,
             override_opt_param_scheduler=True,
@@ -624,23 +681,23 @@ class MegatronPipelineTrainer:
         total_rows = 0.0
         for batch in loader:
             anchors = batch["anchor"]
-            pairs: list[list[str]] = []
-            for index, anchor in enumerate(anchors):
-                pairs.append([anchor, batch["positive"][index]])
-                for key in sorted(k for k in batch if k.startswith("negative")):
-                    pairs.append([anchor, batch[key][index]])
 
-            # Chunk by row count so a full split does not need one enormous
-            # forward; forward-only has no optimizer state, so a wider batch is
-            # cheap but still bounded by the smallest card.
-            step_pairs = max(1, int(eval_batch_rows)) * self.pairs_per_row
-            for start in range(0, len(pairs), step_pairs):
-                chunk = pairs[start : start + step_pairs]
-                inputs, context = self.batcher.encode(chunk)
-                context["labels"] = torch.tensor(
-                    [1.0 if i % self.pairs_per_row == 0 else 0.0 for i in range(len(chunk))],
-                    device=inputs["input_ids"].device,
-                )
+            # Split the evaluation rows into micro-batches exactly like training:
+            # the schedule shapes its p2p tensors from `micro_batch_size`, so
+            # handing it the whole chunk at once asks every stage to hold that
+            # many sequences' activations simultaneously (15.25 GiB in one
+            # allocation on P800).
+            rows_per_eval_batch = max(1, int(eval_batch_rows))
+            for start in range(0, len(anchors), rows_per_eval_batch):
+                chunk_rows = anchors[start : start + rows_per_eval_batch]
+                chunk: list[list[str]] = []
+                for offset, anchor in enumerate(chunk_rows):
+                    index = start + offset
+                    chunk.append([anchor, batch["positive"][index]])
+                    for key in sorted(k for k in batch if k.startswith("negative")):
+                        chunk.append([anchor, batch[key][index]])
+
+                microbatches = max(1, len(chunk) // self.pairs_per_microbatch)
                 stream = iter([chunk])
                 with torch.no_grad():
                     outputs = schedule(
@@ -649,19 +706,23 @@ class MegatronPipelineTrainer:
                         ),
                         data_iterator=[_SingleBatch(stream)] * len(self.models),
                         model=self.models,
-                        num_microbatches=1,
+                        num_microbatches=microbatches,
                         seq_length=self.max_length,
-                        micro_batch_size=len(chunk),
+                        micro_batch_size=self.pairs_per_microbatch,
                         decoder_seq_length=self.max_length,
                         forward_only=True,
                     )
                 if not outputs:
                     continue
-                metrics = outputs[-1]
-                count = float(metrics.get("rows", 0))
-                total_loss += float(metrics.get("loss", 0.0)) * count
-                total_correct += float(metrics.get("accuracy", 0.0)) * count
-                total_rows += count
+                # Forward-only returns one metric dict per micro-batch; weight by
+                # rows because the last one may be short.
+                for metrics in outputs:
+                    if not isinstance(metrics, dict):
+                        continue
+                    count = float(metrics.get("rows", 0))
+                    total_loss += float(metrics.get("loss", 0.0)) * count
+                    total_correct += float(metrics.get("accuracy", 0.0)) * count
+                    total_rows += count
 
         stats = torch.tensor([total_loss, total_correct, total_rows], device=self.device)
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
