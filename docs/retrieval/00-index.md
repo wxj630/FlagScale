@@ -26,13 +26,14 @@
 > 怎么接入）。
 >
 > **FlagGems 现状（实测）**：
-> - 昆仑芯：厂商 Triton（`3.6.0+gitcd2d6c1b`，带 `language/extra/xpu`）可从
->   FlagOS 厂商仓库装，flag_gems 也能装；但**实测 10 个算子里 9 个比原生更慢**
->   （`sum` 慢 37×、`layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
+> - 昆仑芯：厂商 Triton（`3.6.0+gitcd2d6c1b`，带 `language/extra/xpu`）与
+>   flag_gems 都能装；但**实测 10 个算子里 9 个比原生更慢**（`sum` 慢 37×、
+>   `layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
 > - PPU：还没试。
 >
-> 所以上面的吞吐数字仍是**未优化基线**，且"靠 FlagGems 补齐"这个假设已被昆仑芯
-> 的实测否定。
+> **优化优先级必须按「每步增量」而不是「倍数」**（详见 08）：
+> BGE 的差距 93% 在 `flash_attention_fwd`（+6.62 ms/步），
+> 而 FlagGems 不覆盖 flash attention —— 所以"靠 FlagGems 补齐吞吐"不成立。
 >
 > **全部结果均未引入 FlagGems**（`use_flaggems=false`），属未优化基线。
 
