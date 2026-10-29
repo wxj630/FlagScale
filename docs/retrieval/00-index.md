@@ -31,9 +31,12 @@
 >   `layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
 > - PPU：还没试。
 >
-> **优化优先级必须按「每步增量」而不是「倍数」**（详见 08）：
-> BGE 的差距 93% 在 `flash_attention_fwd`（+6.62 ms/步），
-> 而 FlagGems 不覆盖 flash attention —— 所以"靠 FlagGems 补齐吞吐"不成立。
+> **优化目标必须按真实 step 的 profiler 归因**（微基准会给出错误排序，详见 08）。
+> 昆仑芯 BGE 真实 step 25.25 → 175.14 ms（6.94×），增量集中在：
+> **`gelu` +36.34 ms（22%，走了 fp32 highprecision 路径）**、
+> **胶水 kernel +58.31 ms（33%，`cast_te`/`findmax1d`/`tensor_calc_basic`/`transpose`，
+> A100 上不存在）**、gemm +32.38 ms。
+> `flash_attention` 只有 1.26×（占 1%），**不是瓶颈**——早前微基准的结论是错的。
 >
 > **全部结果均未引入 FlagGems**（`use_flaggems=false`），属未优化基线。
 
