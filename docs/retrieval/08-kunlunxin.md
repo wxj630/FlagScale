@@ -274,36 +274,52 @@ FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yam
 `gelu_and_mul` / `silu_and_mul` 把 SwiGLU 的两次 elementwise 合成一次。
 按 A100 上 elementwise+reduce 占 18% 算，这类融合能再省掉一部分。
 
-### 接入的**真实阻塞点**：昆仑芯缺厂商版 Triton
+### 接入的可行性：**厂商版 Triton 现成可取，只差装**
 
-FlagGems 的昆仑芯后端声明了：
+FlagGems 的昆仑芯后端声明了 `triton_extra_name="xpu"`，也就是需要带
+`triton.language.extra.xpu` 的厂商 Triton。**实测该版本在 FlagOS 的厂商
+PyPI 仓库里可以直接下载**：
 
-```python
-vendor_info = VendorDescriptor(
-    vendor_name="kunlunxin",
-    triton_extra_name="xpu",   # ← 需要 triton.language.extra.xpu
-    ...
-)
+```bash
+pip index versions triton \
+  --index-url https://resource.flagos.net/repository/flagos-pypi-kunlunxin/simple
+# Available: 3.6.0+gitcd2d6c1b, 3.5.0, 3.0.0+a48aedef, 3.0.0+0762702f
 ```
 
-而实测这台机器：
+`3.6.0+gitcd2d6c1b` 正是 `backends.yaml` 为 `kunlunxin` 指定的版本：
 
-| 项 | 状态 |
+```yaml
+kunlunxin:
+  python: "3.10"
+  triton: triton==3.6.0+gitcd2d6c1b
+  flagtree: flagtree==0.7.0+xpu3.6
+```
+
+已实测下载并检查 wheel 内容（1.7 GB）：
+
+| 项 | 结果 |
 |---|---|
-| `triton` | 3.5.0（**stock PyPI 版**，在 `envs/ads/site-packages`） |
-| `triton.language.extra.xpu` | ❌ **ModuleNotFoundError** |
-| `flag_gems` | ❌ **未安装**（我们一直用 `use_flaggems=false`） |
+| 下载 | ✅ 成功（`triton-3.6.0+gitcd2d6c1b-cp310-cp310-linux_x86_64.whl`） |
+| `triton/language/extra/xpu/` | ✅ **存在**（`__init__.py` + `libdevice.py`） |
+| `triton/backends/xpu/` | ✅ **561 个条目**（compiler / driver / C 源码） |
+| `libtriton.so` | ✅ 1 个 |
 
-`_kunlunxin/ops/acos.py` 等多个文件直接 `import triton.language.extra.xpu.libdevice`，
-源码注释也写明"non-kunlunxin platforms … ModuleNotFoundError on vendors without
-the xpu triton extra"。
+> **更正**：本文件早前写「昆仑芯缺厂商 Triton、需要向厂商索取」，
+> 那是把"当前 venv 里装的是 stock 3.5.0"误说成"厂商没有提供"。
+> 厂商仓库里就有，只是我们没装。
 
-**所以接过来需要两步，缺一不可**：
+### 所以接入步骤是
 
-1. **拿到昆仑芯的厂商 Triton**（带 `language.extra.xpu`）—— 需向厂商索取，
-   `backends.yaml` 里 `kunlunxin:` 条目写了对应的安装源
-2. `pip install flag_gems` + 设 `GEMS_VENDOR=kunlunxin`，然后关掉
-   `use_flaggems=false`（当前配置里是关闭的）
+1. `pip install "triton==3.6.0+gitcd2d6c1b" --index-url
+   https://resource.flagos.net/repository/flagos-pypi-kunlunxin/simple`
+   （当前是 stock 3.5.0，在 `envs/ads/site-packages`）
+2. `pip install flag_gems`（同样从厂商 index）
+3. 启动脚本设 `GEMS_VENDOR=kunlunxin`，并把 `use_flaggems` 从 `false` 改 `true`
+
+**风险**：升级 triton 会影响现有的 2.9.0+cu128 环境，需要先验证 XPytorch
+仍能加载（`import torch` 走 `xpytorch_import_hook`，它 hook 了 triton 的一部分路径）。
+建议在独立 venv 或容器副本里做，不要直接动正在跑实验的环境。
+
 
 ### 预期收益（按算子占比推算）
 
