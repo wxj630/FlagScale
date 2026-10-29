@@ -272,3 +272,12 @@ vendor_info = VendorDescriptor(
 CLIP 的 GEMM 占 52%，剩余 48% 里 `bmm` 是核心。若把 `sum`（18.6×）、
 `bmm`（15.3×）、`gelu`（11.2×）、`layer_norm`（7.6×）追到 1.5× 以内，
 非 GEMM 部分提速约 **2.9×**，整体从 58.1% 到 **~80%**，刚好过门槛。
+
+### 附：fp32 GEMM 与折扣系数
+
+实测（见 `07-a100.md`）表明我们的负载是 **bf16-GEMM**：BGE 的 fp32 GEMM 只占
+0.18%（对比学习打分矩阵），CLIP 为 0%，reranker 为 0.001%。
+
+**所以 PPU 的折扣系数应按 bf16 FLOPS + 显存带宽计算**，
+不需要把 fp32 FLOPS 纳入——`master_dtype=fp32` 只影响常驻显存与 optimizer，
+前向/反向的 GEMM 仍是 bf16。
