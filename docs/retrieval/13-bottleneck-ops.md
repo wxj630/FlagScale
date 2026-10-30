@@ -8,7 +8,7 @@
 
 | 平台 | flag_gems 版本 | 逐算子实测 | 真实训练 |
 |---|---|---|---|
-| 昆仑芯 P800 | 5.4.0（vendor `kunlunxin`） | **10 个里 9 个更慢**（`sum` 0.03×、`layer_norm` 0.04×、GELU 0.65×） | ❌ 跑不完（3 个 bug） |
+| 昆仑芯 P800 | 5.4.0（vendor `kunlunxin`） | **10 个里 9 个更慢**（`sum` 0.03×、`layer_norm` 0.04×、GELU 0.65×） | ❌ 跑不完（JIT 每 kernel ~1.6 s + 4 个崩溃点） |
 | PPU ZW810E | 5.4.0（vendor `thead`） | **13 个里 12 个更慢，GEMM 持平**（0.99×） | ⚠️ 未测 |
 
 细节见 [12-flaggems-integration.md](12-flaggems-integration.md)。

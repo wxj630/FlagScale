@@ -100,7 +100,7 @@ Triton kernel 是提前编译的，报出来是普通 kernel 符号。
 
 | 平台 | flag_gems | 逐算子实测 | 真实训练 |
 |---|---|---|---|
-| **昆仑芯 P800** | ✅ 5.4.0 已装（vendor `kunlunxin`） | **10 个里 9 个更慢** | ❌ **跑不完**（3 个 bug） |
+| **昆仑芯 P800** | ✅ 5.4.0 已装（vendor `kunlunxin`） | **10 个里 9 个更慢** | ❌ **跑不完**（4 个崩溃点） |
 | **PPU ZW810E** | ✅ **5.4.0 已装**（vendor `thead`） | **13 个里 12 个更慢，GEMM 持平** | ⚠️ 未测 |
 
 **所以 FlagGems 不是可用的提速路径。**要找拖累算子，只能按真实 step 的
@@ -169,15 +169,17 @@ pointwise kernel，丢掉了厂商 kernel 的融合与向量化，而厂商 kern
 本身并不差（见 `08-kunlunxin.md` 的真实 step 归因：GEMM 1.2×、
 attention 0.86×，本来就不是瓶颈）。
 
-### 三个已经定位的兼容性 bug（都会让真实训练失败）
+### 四个已经定位的崩溃点（都会让真实训练失败）
 
 | 崩溃点 | 报错 | 原因 |
 |---|---|---|
 | `torch.tensor(1.0) - mask`（transformers 构造 attention mask） | `RuntimeError: invalid argument to exchangeDevice` | FlagGems 的 `sub` 对 **CPU 标量张量**取 `in0.device.index`（为 None），直接崩 |
 | `F.scaled_dot_product_attention` | `AssertionError: Currently only support dropout_p=0.0` | FlagGems 的 `_scaled_dot_product_efficient_attention` 不支持训练时的 dropout（BGE 的 attention dropout = 0.1） |
 | **只开 GELU**（其余全 exclude） | `error code= 719, unspecified launch failure`（XCCL `kl3ChannelCheckErrors`） | FlagGems 的 `gelu` **反向**在 bf16 下触发 GPU kernel 异常 |
+| **全量开启**（排了 `sub` 和 SDPA 之后） | `nll_loss_reduce_kernel -> Exception in kernel execution(err_code: -714)` | `F.cross_entropy` 前向的 `nll_loss` kernel 启动失败 |
 
-前两个可以通过 exclude 规避；**第三个绕不过去**——它恰好是昆仑芯最想优化的那个算子。
+前两个可以通过 exclude 规避；**第三、第四个绕不过去**——GELU 恰好是昆仑芯
+最想优化的算子（占差距 65.8%），`cross_entropy` 则是每个 step 都要跑的损失。
 
 所以当前在昆仑芯上可用但不划算的配置是：
 
@@ -196,12 +198,27 @@ train.hardware.flaggems_exclude:
 | 配置 | 结果 |
 |---|---|
 | FlagGems 关闭 | **3,388 ms/step，59.0 samples/s** |
-| **全量开启**（只排除 `sub` + SDPA） | ❌ **卡死**：JIT 编译 23 分钟不返回，CPU 100% |
+| **全量开启**（只排除 `sub` + SDPA），冷缓存 | ⏱ 23 分钟未跑完一个 step，手动终止 |
+| **全量开启**（同上），缓存预热后 | ❌ **19 分钟后崩在 `nll_loss_reduce_kernel`**（`err_code: -714`） |
 | **只开 GELU**（其余 50+ 算子全部 exclude） | ❌ **`error code= 719`**：GPU kernel exception |
 
-**全量开启在昆仑芯上不可用**——不是慢，是跑不完。
-只开 GELU 也不行。所以"打开 FlagGems 看吞吐"这条路在昆仑芯当前版本上
-走不通，必须先把这三个 bug 修掉。
+**全量开启不是"死锁"，是 JIT 编译极慢 + 最终崩溃。**两次运行的实测：
+
+| 运行 | 时长 | 期间新增编译产物 | 结束方式 |
+|---|---|---|---|
+| 冷缓存 | 23 min（CPU 100%） | **2,090 个**，被终止时仍在增长 | 手动 kill |
+| 缓存预热后 | 19 min（19:01→19:20） | **697 个**，持续到崩溃那一刻 | `nll_loss` launch failure |
+
+按 697 个 / 19 分钟算，**每个 kernel 现编约 1.6 秒**，而一个训练 step 会触及
+数百个 shape/算子组合。
+
+**关键细节：缓存预热后那 19 分钟里，一个 step 都没完成。**崩溃发生在
+**第一个 forward** 的 `cross_entropy`——日志里崩前的 4 条 `vector_norm` 警告
+来自 `embedding_loss` 里的 `F.normalize`（loss 第 52 行），不是
+`clip_grad_norm`（它在 loss 第 80 行的 `cross_entropy` 之后才可能被调用）。
+也就是说：**编译 19 分钟后，第一次前向就崩了。**
+
+**结论：FlagGems 在昆仑芯当前版本上不能用于训练**，共 4 个崩溃点（见下）。
 
 ### 结论：FlagGems 不是"打开就变快"的开关
 

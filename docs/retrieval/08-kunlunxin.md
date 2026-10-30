@@ -480,12 +480,18 @@ FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yam
 > | 配置 | 结果 |
 > |---|---|
 > | 关闭 | **3,388 ms/step，59.0 samples/s** |
-> | 全量开启（只排 `sub` + SDPA） | ❌ **卡死**：JIT 编译 23 分钟不返回，CPU 100% |
+> | 全量开启（只排 `sub` + SDPA），冷缓存 | ⏱ 23 分钟未跑完一个 step（期间现编 2,090 个 kernel） |
+> | 全量开启，缓存预热后 | ❌ 19 分钟后崩在 `nll_loss_reduce_kernel`（`err_code -714`，期间又现编 697 个） |
 > | 只开 GELU（其余全 exclude） | ❌ **`error code= 719`** GPU kernel exception |
 >
-> 三个兼容性 bug：`sub` 对 CPU 标量张量取 `device.index`（None）崩溃、
-> FlagGems 的 SDPA 不支持 `dropout_p>0`、`gelu` 反向在 bf16 下触发 kernel 异常。
-> **换句话说：不是"开了变慢"，是当前版本根本跑不完。**
+> 四个崩溃点：`sub` 对 CPU 标量张量取 `device.index`（None）、
+> FlagGems 的 SDPA 不支持 `dropout_p>0`、`gelu` 反向在 bf16 触发 kernel 异常、
+> `cross_entropy` 的 `nll_loss` kernel 启动失败。
+>
+> **它不是"开了变慢"，也不是死锁——是每个 kernel 现编约 1.6 秒，
+> 而且预热缓存后再跑 19 分钟，连第一个 forward 都没走完就崩了。**
+> （崩前的 `vector_norm` 警告来自 loss 里的 `F.normalize`，不是
+> `clip_grad_norm`，所以不能据此认为"已经跑进训练循环"。）
 
 #### 安装与注册：全部成功
 

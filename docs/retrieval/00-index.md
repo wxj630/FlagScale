@@ -32,8 +32,11 @@
 > - 配置开关 `train.hardware.use_flaggems` **以前是死配置**（只写环境变量、
 >   无人读取），现已接通并由 `flagscale/train/utils/flaggems.py` 读取。
 > - 昆仑芯（flag_gems 5.4.0 已装）：**10 个里 9 个更慢**（`sum` 0.03×、
->   `layer_norm` 0.04×、GELU 0.65×），且真实训练**跑不完**——`sub` 的 CPU
->   标量路径崩、SDPA 不支持 dropout、单开 GELU 触发 `error 719`。
+>   `layer_norm` 0.04×、GELU 0.65×），且真实训练**跑不完**：JIT 每 kernel
+>   现编约 1.6 秒（预热缓存后再跑 19 分钟仍连第一个 forward 都没走完），
+>   且有 4 个崩溃点
+>   （`sub` 的 CPU 标量路径、SDPA 不支持 dropout、GELU 反向 error 719、
+>   `nll_loss` launch failure）。
 > - PPU（flag_gems 5.4.0 已装）：**13 个里 12 个更慢，GEMM 持平 0.99×**。
 > - **结论：换 FlagGems 不是提速路径。**拖累算子必须由厂商在原生 kernel 层解决，
 >   名单见 [13](13-bottleneck-ops.md)。
