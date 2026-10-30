@@ -53,6 +53,8 @@ def main():
     ap.add_argument("--skip", type=int, default=2, help="warm-up steps")
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--no-profile", action="store_true")
+    ap.add_argument("--prof-steps", type=int, default=3,
+                    help="steps to profile for op attribution (averaged)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="auto", help="auto | cuda | flagos | npu")
     a = ap.parse_args()
@@ -90,55 +92,84 @@ def main():
     prof = None
     if not a.no_profile:
         from torch.profiler import profile, ProfilerActivity
-        prof = profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU])
+        # acc_events keeps every start/stop cycle in the result.  Without it the
+        # profiler clears events at each cycle and key_averages() reports only the
+        # last profiled step, which silently divides the total by prof_steps.
+        prof = profile(activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+                       acc_events=True)
 
     total_wall = []
-    for step in range(a.skip + a.steps):
-        recording = prof is not None and step == a.skip + a.steps - 1
-        t_step = time.perf_counter()
-        optimizer.zero_grad(set_to_none=True)
-        if recording:
-            prof.start()
-        for _ in range(accum):
-            t0 = time.perf_counter(); batch = next(stream); seg["data"].append(time.perf_counter() - t0)
+    # Phase 1 times steps with the profiler off.  Phase 2 replays the same number
+    # of steps with the profiler on: enabling it inflates wall clock by ~2x, so
+    # its timings are thrown away and only the op attribution is kept.  Profiling
+    # several steps matters because batch lengths differ per step (the loader
+    # length-sorts within a window), and a single profiled step was measured
+    # varying 25% from another on the same machine.
+    phases = [("timed", a.steps)]
+    if prof is not None:
+        phases.append(("profiled", a.prof_steps))
+    for phase, count in phases:
+        for i in range(count + (a.skip if phase == "timed" else 0)):
+            timed = phase == "timed" and i >= a.skip
+            recording = phase == "profiled"
+            # Tokenising for measurement would make the step run it twice (once
+            # here, once inside loss_for_batch), inflating wall clock by the whole
+            # tokenise cost.  So the tokenise/H2D probes only run on the warm-up
+            # steps, where nothing is timed; batch lengths come from the same
+            # loader, so the distribution matches.
+            probe_io = phase == "timed" and not timed
+            t_step = time.perf_counter()
+            optimizer.zero_grad(set_to_none=True)
+            if recording:
+                prof.start()
+            for _ in range(accum):
+                t0 = time.perf_counter(); batch = next(stream); dt = time.perf_counter() - t0
+                if timed:
+                    seg["data"].append(dt)
 
-            # Tokenisation is host-only, so timing it with the device idle gives
-            # its true cost.  The real step then runs loss_for_batch, which
-            # tokenises again internally; ``forward`` is that whole call, and the
-            # two numbers are subtracted to isolate compute.
-            sync()
-            t0 = time.perf_counter()
-            feats = {k: model.prepare_embedding_inputs(batch[k]) for k in sorted(batch)}
-            seg["tokenize"].append(time.perf_counter() - t0)
-            t0 = time.perf_counter()
-            {k: move_features(v, dev) for k, v in feats.items()}
-            sync()
-            seg["h2d"].append(time.perf_counter() - t0)
-            del feats
+                if probe_io:
+                    # Tokenisation is host-only, so timing it with the device idle
+                    # gives its true cost.
+                    sync()
+                    t0 = time.perf_counter()
+                    feats = {k: model.prepare_embedding_inputs(batch[k]) for k in sorted(batch)}
+                    seg["tokenize"].append(time.perf_counter() - t0)
+                    t0 = time.perf_counter()
+                    {k: move_features(v, dev) for k, v in feats.items()}
+                    sync()
+                    seg["h2d"].append(time.perf_counter() - t0)
+                    del feats
+
+                sync(); t0 = time.perf_counter()
+                with autocast_context(dev, dtype_name):
+                    loss = loss_for_batch(model, processor, task, batch, dev, float(cfg.temperature))
+                sync(); dt = time.perf_counter() - t0
+                if timed:
+                    seg["forward"].append(dt)
+
+                sync(); t0 = time.perf_counter()
+                (loss / accum).backward()
+                sync(); dt = time.perf_counter() - t0
+                if timed:
+                    seg["backward"].append(dt)
 
             sync(); t0 = time.perf_counter()
-            with autocast_context(dev, dtype_name):
-                loss = loss_for_batch(model, processor, task, batch, dev, float(cfg.temperature))
-            sync(); seg["forward"].append(time.perf_counter() - t0)
-
-            sync(); t0 = time.perf_counter()
-            (loss / accum).backward()
-            sync(); seg["backward"].append(time.perf_counter() - t0)
-
-        sync(); t0 = time.perf_counter()
-        if float(cfg.optimizer.get("max_grad_norm", 0) or 0) > 0:
-            torch.nn.utils.clip_grad_norm_(trainable, float(cfg.optimizer.max_grad_norm))
-        optimizer.step()
-        sync(); seg["clip_step"].append(time.perf_counter() - t0)
-        if recording:
-            prof.stop()
-        if step >= a.skip:
-            total_wall.append(time.perf_counter() - t_step)
-            print(f"  step {step}: {total_wall[-1]*1000:.0f} ms", flush=True)
+            if float(cfg.optimizer.get("max_grad_norm", 0) or 0) > 0:
+                torch.nn.utils.clip_grad_norm_(trainable, float(cfg.optimizer.max_grad_norm))
+            optimizer.step()
+            sync(); dt = time.perf_counter() - t0
+            if timed:
+                seg["clip_step"].append(dt)
+            if recording:
+                prof.stop()
+            if timed:
+                total_wall.append(time.perf_counter() - t_step)
+                print(f"  step {i}: {total_wall[-1]*1000:.0f} ms", flush=True)
 
     med = {k: statistics.median(v) * 1000 for k, v in seg.items()}
-    # ``forward`` already contains one tokenise + one H2D, so only the three
-    # per-micro segments plus the optimizer belong to the wall time.
+    # ``forward`` is the whole loss_for_batch call, so it already contains one
+    # tokenise and one H2D; the probes measured those on other batches, and are
+    # subtracted to isolate device compute.
     per_step = {k: med[k] * accum for k in ("data", "forward", "backward")}
     per_step["clip_step"] = med["clip_step"]
     per_step["tokenize_seen_inside_forward"] = med["tokenize"] * accum
@@ -164,12 +195,13 @@ def main():
         aten = {k: v for k, v in ops.items() if k.startswith("aten::")}
         level = aten if aten else ops
         kernel_ms = sum(v["ms"] for v in level.values())
-        out["profiled_steps"] = 1
+        out["profiled_steps"] = a.prof_steps
         out["kernel_ms"] = kernel_ms
+        out["kernel_ms_per_step"] = kernel_ms / max(1, a.prof_steps)
         out["kernel_level"] = "aten" if aten else "kernel"
         out["kernel_ms_all_entries"] = sum(v["ms"] for v in ops.values())
         out["ops"] = ops
-        out["kernel_pct"] = kernel_ms / wall_ms * 100
+        out["kernel_pct"] = kernel_ms / max(1, a.prof_steps) / wall_ms * 100
 
     print(f"\n=== batch {batch_rows} rows x accum {accum} = {texts} texts/step ===")
     print(f"wall/step          {wall_ms:9.1f} ms")
@@ -190,8 +222,9 @@ def main():
     device_compute = per_step["forward_pure_compute"] + per_step["backward"]
     print(f"{'device compute (fwd+bwd)':34}{device_compute:11.2f}{device_compute/wall_ms*100:9.1f}")
     if prof is not None:
-        print(f"kernel ({out['kernel_level']})  {out['kernel_ms']:9.1f} {out['kernel_pct']:8.1f}% of wall"
-              f"   [all entries {out['kernel_ms_all_entries']:.1f}]")
+        print(f"kernel ({out['kernel_level']})  {out['kernel_ms_per_step']:9.1f} "
+              f"{out['kernel_pct']:8.1f}% of wall  "
+              f"[{a.prof_steps} steps, {out['kernel_ms']:.0f} ms total]")
     if a.out:
         json.dump(out, open(a.out, "w"), indent=1)
 

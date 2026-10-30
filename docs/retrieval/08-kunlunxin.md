@@ -240,83 +240,97 @@ FlagGems 的融合 kernel 价值在后者——把 `add + rms_norm`、`silu + mu
 
 `examples/retrieval/profile_step_segments.py` 跑真实 conf（batch 10 × accum 4 = **200 texts/step**，
 序列长度按 `length_sort_window` 动态 padding，实测 padded 均值 **299**
-而非配置上限 512），profile 一次完整的 optimizer step。
+而非配置上限 512），计时与 profile 分两个阶段：计时阶段不开 profiler
+（开了会让墙钟翻倍），profile 阶段连跑 4 步取平均（单步之间因 token 数不同
+可差 25%）。**tokenize 只在 warm-up 步单独测**，否则同一批会被 tokenize 两次。
+
+> **复现性**：两个平台各跑两遍，kernel 时间分别为 A100 1,419 / 1,415 ms、
+> 昆仑芯 2,923 / 2,923 ms（**差 <0.3%**）；墙钟差约 2%。下面的表取第一遍。
 
 | 项 | A100 | 昆仑芯 | 倍数 |
 |---|---|---|---|
-| **整 step 墙钟** | **1,830 ms** | **3,368 ms** | **1.84×** |
-| forward（含 tokenize + H2D） | 751 ms | 1,313 ms | 1.75× |
-| backward | 928 ms | 1,810 ms | 1.95× |
-| clip + optimizer.step | 22 ms | 63 ms | 2.8× |
-| tokenize（在 forward 内） | 110 ms | 107 ms | **0.97×** |
-| dataloader `next()` | 0.7 ms | 1.1 ms | — |
-| **device 计算（fwd+bwd）** | **1,566 ms（85.6%）** | **3,012 ms（89.4%）** | 1.92× |
-| kernel 时间（profiler，单层） | 1,482 ms（aten 层） | 3,093 ms（kernel 层） | 2.09× |
+| **整 step 墙钟**（profiler 关闭） | **1,605 ms** | **3,262 ms** | **2.03×** |
+| forward（含 tokenize + H2D） | 667 ms（41.5%） | 1,306 ms（40.0%） | 1.96× |
+| backward | 948 ms（59.1%） | 1,935 ms（59.3%） | 2.04× |
+| clip + optimizer.step | 22 ms（1.4%） | 62 ms（1.9%） | 2.8× |
+| tokenize（在 forward 内） | 107 ms（6.7%） | 105 ms（3.2%） | **0.98×** |
+| H2D（在 forward 内） | 2.7 ms（0.2%） | 4.0 ms（0.1%） | 1.5× |
+| dataloader `next()` | 0.67 ms（0.04%） | 1.11 ms（0.03%） | — |
+| **device 计算（fwd+bwd）** | **1,504 ms（93.7%）** | **3,132 ms（96.0%）** | 2.08× |
+| kernel 时间（profiler，单层） | 1,419 ms（88.4%） | 2,923 ms（89.6%） | 2.06× |
 
-**两个平台的 step 都有 86-89% 在 device 计算里，tokenize 只占 3-6%，
-dataloader 占 0.03%。** 同一份 CPU 代码在两边 tokenize 耗时几乎相同
-（110 vs 107 ms），说明 CPU 侧不是差异来源。
+**两个平台的 step 都有 94-96% 在 device 计算里，tokenize 只占 3-7%，
+dataloader 占 0.03-0.04%。** 同一份 CPU 代码在两边 tokenize 耗时几乎相同
+（107 vs 105 ms），说明 CPU 侧完全不是差异来源。
+
+> 分段实测（device 计算 1,504 / 3,132 ms）与 profiler 的 kernel 合计
+> （1,419 / 2,923 ms）相差约 6-7%，差异是 profiler 统计不到的
+> 同步空隙与 host 侧发射开销。两个独立口径互相印证。
 
 #### 按语义归类的差距分解（整步，A100 vs 昆仑芯）
 
 | 类别 | A100 | 昆仑芯 | 每步增量 | 占增量 | 倍数 |
 |---|---|---|---|---|---|
-| **activation（GELU）** | 42.5 ms | **1,097.9** | **+1,055.4** | **65.5%** | **25.8×** |
-| **copy/cast/transpose** | 0 | **305.5** | **+305.5** | **19.0%** | — |
-| gemm | 694.8 | 868.8 | +174.0 | 10.8% | 1.3× |
-| reduce | 52.1 | 94.4 | +42.3 | 2.6% | 1.8× |
-| dropout | 21.3 | 60.4 | +39.1 | 2.4% | 2.8× |
-| elementwise | 120.7 | 158.2 | +37.5 | 2.3% | 1.3× |
-| embedding | 7.5 | 22.5 | +15.0 | 0.9% | 3.0× |
-| norm | 80.3 | 64.2 | **−16.0** | — | **0.80×** |
-| attention | 341.8 | 299.4 | **−42.5** | — | **0.88×** |
-| copy（A100 的 `aten::copy_`） | 88.5 | 0 | −88.5 | — | — |
-| **合计** | **1,481.8** | **3,093.1** | **+1,611.3** | 100% | **2.09×** |
+| **activation（GELU）** | 40.5 ms | **1,028.9** | **+988.5** | **65.8%** | **25.4×** |
+| **copy/cast/transpose** | 0 | **309.0** | **+309.0** | **20.6%** | — |
+| gemm | 666.7 | 819.8 | +153.2 | 10.2% | 1.2× |
+| other | 1.8 | 104.3 | +102.5 | 6.8% | 58.1× |
+| reduce | 51.6 | 91.5 | +39.9 | 2.7% | 1.8× |
+| dropout | 21.0 | 57.4 | +36.4 | 2.4% | 2.7× |
+| elementwise | 116.6 | 152.1 | +35.5 | 2.4% | 1.3× |
+| embedding | 7.3 | 21.1 | +13.8 | 0.9% | 2.9× |
+| norm | 76.5 | 61.2 | **−15.3** | — | **0.80×** |
+| attention | 321.7 | 277.4 | **−44.3** | — | **0.86×** |
+| copy（A100 的 `aten::copy_`） | 85.5 | 0 | −85.5 | — | — |
+| optimizer（A100 的 `_foreach_*`） | 18.6 | 0 | −18.6 | — | — |
+| **合计** | **1,419.3** | **2,922.7** | **+1,503.4** | 100% | **2.06×** |
 
-**结论：差距的 65% 来自 GELU 一项，19% 来自 dtype 转换/转置胶水。
-GEMM 只占 11%，attention 和 layer_norm 在昆仑芯上反而更快。**
+**结论：差距的 66% 来自 GELU 一项，21% 来自 dtype 转换/转置胶水。
+GEMM 只占 10%，attention 和 layer_norm 在昆仑芯上反而更快。**
 
-#### 逐 kernel 明细（昆仑芯，前 12）
+#### 逐 kernel 明细（昆仑芯，每步均值，前 11）
 
-| kernel | 调用 | ms | 占比 |
+| kernel | 调用/步 | ms/步 | 占比 |
 |---|---|---|---|
-| `gelu_bwd_highprecision_nv` | 480 | 698.4 | 22.6% |
-| `gelu_highprecision_nv` | 480 | 399.5 | 12.9% |
-| `fc_bf16_rn_mn_kmn`（GEMM） | 1,776 | 264.1 | 8.5% |
-| `flash_attn_bwd_xpu3_radical_v2` | 480 | 159.7 | 5.2% |
-| `flash_attention_fwd_2_sdnn` | 480 | 123.8 | 4.0% |
-| `fc_bf16_rn_one_loop` ×2 种 | 3,300 | 188.8 | 6.1% |
-| `tensor_calc_basic<bf16>`（elementwise） | 9,371 | 92.5 | 3.0% |
-| `fc_bf16_rn_kn_mnk` ×2 种 | 672 | 137.3 | 4.4% |
-| `cast_te`（bf16↔fp16/fp32） | 4,800 | 68.7 | 2.2% |
-| `transpose_021_sdnn` | 1,936 | 67.2 | 2.2% |
-| `tensor_calc_basic<float>` | 2,900 | 65.4 | 2.1% |
-| `cluster_cast_kl3` ×2 方向 | 12,399 | 106.8 | 3.5% |
+| `gelu_bwd_highprecision_nv` | 480 | **654.2** | **22.4%** |
+| `gelu_highprecision_nv` | 480 | **374.7** | **12.8%** |
+| `fc_bf16_rn_mn_kmn[algo9]`（GEMM） | 1,746 | 258.5 | 8.8% |
+| `flash_attn_bwd_xpu3_radical_v2` | 480 | 147.2 | 5.0% |
+| `flash_attention_fwd_2_sdnn` | 480 | 114.9 | 3.9% |
+| `fc_bf16_rn_one_loop[algo9]` ×2 种 | 3,414 | 182.0 | 6.3% |
+| `tensor_calc_basic<bf16>`（elementwise） | 9,371 | 90.1 | 3.1% |
+| `fc_bf16_rn_kn_mnk` | 306 | 89.6 | 3.1% |
+| `transpose_021_sdnn_bsp` | 1,936 | 66.9 | 2.3% |
+| `cast_te`（bf16↔fp16/fp32） | 4,800 | 66.2 | 2.3% |
+| `cluster_cast_kl3` ×2 方向 | — | 约 100 | 约 3.4% |
+
+**GELU 两个 kernel 合计 1,028.9 ms，占总 kernel 时间的 35.2%。**
 
 #### 三个和最初结论相反的发现
 
-**1. `flash_attention` 不是瓶颈，反而更快（0.88×）。**
+**1. `flash_attention` 不是瓶颈，反而更快（0.86×）。**
 最初用微基准得出"flash attention 慢 2.04×，占 BGE 增量 93%"——**这是错的**。
-真实 step 里昆仑芯的 FA 实现相当好（299.4 vs 341.8 ms）。
+真实 step 里昆仑芯的 FA 实现相当好（277.4 vs 321.7 ms）。
 
-**2. GELU 是唯一的大头，占差距的 65.5%。**
-两个 `highprecision` kernel 合计 1,097.9 ms，而 A100 的
-`aten::gelu` + `aten::gelu_backward` 只有 42.5 ms。
+**2. GELU 是唯一的大头，占差距的 65.8%。**
+两个 `highprecision` kernel 合计 1,028.9 ms，而 A100 的
+`aten::gelu` + `aten::gelu_backward` 只有 40.5 ms（**25.4×**）。
 
-**3. 胶水 kernel 排第二：cast / transpose / 通用 elementwise 合计 +305 ms（19%）。**
-`cast_te` 4,800 次、`cluster_cast_kl3` 12,399 次、`transpose_021_sdnn` 1,936 次——
-A100 上这些要么被融合掉、要么成本可忽略。这是厂商 torch 的 kernel 融合不足。
+**3. 胶水 kernel 排第二：cast / transpose 合计 +309.0 ms（20.6%）。**
+`cast_te` 4,800 次、`cluster_cast_kl3` 12,399 次、`transpose_021_sdnn`
+1,936 次/步——A100 上这些要么被融合掉、要么成本可忽略。
+这是厂商 torch 的 kernel 融合不足。
 
 #### 修正早前基于微基准/推理的结论
 
 | 早前说 | 真实 step 实测 |
 |---|---|
 | BGE 差距 93% 在 flash attention | **0.88×，反而更快** |
-| `gelu` 慢 11.9×，占增量 22% | **25.8×，占增量 65.5%** |
-| gemm 占增量 22% | **10.8%**（1.3×） |
+| `gelu` 慢 11.9×，占增量 22% | **25.4×，占增量 65.8%** |
+| gemm 占增量 22% | **10.2%**（1.2×） |
 | `mm` 昆仑芯更快（0.85×） | 真实形状下 1.3× |
-| A100 仅 15% 时间在 kernel | **85.6% 在 device 计算** |
-| 端到端瓶颈"在数据管线" | **dataloader 0.04%，tokenize 6%** |
+| A100 仅 15% 时间在 kernel | **93.7% 在 device 计算**（kernel 层 88.4%） |
+| 端到端瓶颈"在数据管线" | **dataloader 0.04%，tokenize 6.7%** |
 
 > **两条教训：**
 > 1. 微基准的倍数不能直接用来排序优化目标——同一算子在不同形状下
@@ -347,9 +361,9 @@ GELU 也走厂商的 `_highprecision` 路径。实测（hidden 4096，fwd+bwd，
    在 A100 上无差别（0.217 → 0.203）。
 
 按真实 step 的 960 次 GELU 调用（480 前向 + 480 反向）折算，
-真实 step 里 GELU 平均每次 1.14 ms；切到 tanh 近似（约 0.60×）后
-约 0.68 ms/次，**能省 444 ms/step，等于 step 缩短 13.2%，
-BGE 吞吐从 54.0 提到约 62.2 样本/s（45.8% → 52.7% 的 A100 相对值）。**
+GELU 合计 1,028.9 ms；切到 tanh 近似（0.596×）后约 613 ms，
+**能省 416 ms/step，等于 step 缩短 12.8%，BGE 吞吐从 54.0 提到约 61.9
+样本/s（A100 相对值 45.8% → 52.5%）。**
 这仍不够 80% 门槛（需 2.31×），但**它是唯一一个低风险、无需厂商介入的
 立即可做项**。代价是要接受 tanh 近似与精确 GELU 的数值差异
 （BGE-M3 原版用的是精确 GELU），需回归精度。
@@ -538,22 +552,24 @@ XPU_CARD / XPU_VISIBLE_DEVICES             # 卡选择
 > **教训：在这台机器上跑任何东西之前，先用最小 matmul 探一遍目标卡。**
 > `xpu-smi` 的显存/利用率读数不足以判断卡是否可用。
 
-复现脚本：`/data2/jiangxuhui/card_probe.py`（10 行，跑 `< 1 s`）
+复现脚本：`examples/retrieval/probe_card.py`（10 行，跑 `< 1 s`）
 
-### 算子慢 2.09× 而吞吐慢 2.18× —— 两个口径这次是吻合的
+### 算子慢 2.06× 而吞吐慢 2.18× —— 两个口径这次是吻合的
 
 | 项 | A100 | 昆仑芯 | 倍数 |
 |---|---|---|---|
-| **整 step 墙钟**（实测） | **1,830 ms** | **3,368 ms** | **1.84×** |
-| 其中 device 计算（fwd+bwd） | 1,566 ms（**85.6%**） | 3,012 ms（**89.4%**） | 1.92× |
-| tokenize | 110 ms（6.0%） | 107 ms（3.2%） | 0.97× |
-| dataloader | 0.7 ms（0.04%） | 1.1 ms（0.03%） | 1.6× |
-| clip + optimizer | 22 ms（1.2%） | 63 ms（1.9%） | 2.8× |
-| kernel 时间（profiler） | 1,482 ms | 3,093 ms | 2.09× |
-| 吞吐 | 117.9 texts/s | 54.0 texts/s | 0.46× |
+| **整 step 墙钟**（实测） | **1,605 ms** | **3,262 ms** | **2.03×** |
+| 其中 device 计算（fwd+bwd） | 1,504 ms（**93.7%**） | 3,132 ms（**96.0%**） | 2.08× |
+| tokenize | 107 ms（6.7%） | 105 ms（3.2%） | 0.98× |
+| dataloader | 0.67 ms（0.04%） | 1.11 ms（0.03%） | 1.7× |
+| clip + optimizer | 22 ms（1.4%） | 62 ms（1.9%） | 2.8× |
+| kernel 时间（profiler） | 1,419 ms | 2,923 ms | 2.06× |
+| 吞吐（整轮训练实测） | 117.9 texts/s | 54.0 texts/s | 2.18× |
 
-**step 慢 1.84×、算子慢 1.92-2.09× 是同一个量级，逻辑自洽**：
-既然 86-89% 的时间都在 device 计算里，算子慢多少，step 就慢多少。
+**step 慢 2.03×、算子慢 2.06-2.08×、吞吐慢 2.18× 三者吻合**：
+既然 94-96% 的时间都在 device 计算里，算子慢多少，step 和吞吐就慢多少。
+剩下的 7% 差异来自各 epoch 的验证、最终测试与启动开销按样本摊薄，
+以及训练过程中 step 长度的自然波动。
 
 > ⚠️ 早前这一节写的是「kernel 慢 6.94× 但吞吐只慢 2.18×，差值被非 kernel 开销
 > 稀释」。**那个解释是错的**：6.94× 来自 batch 4 合成输入的 profile
