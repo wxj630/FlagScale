@@ -22,17 +22,21 @@
 | **10** | [**微基准与折扣系数**](10-microbench-discount.md) | — | 六家芯片实测 bf16/带宽 → 折扣系数（含/不含 FP32 两口径） |
 | **11** | [**给厂商的问题清单**](11-vendor-questions.md) | — | 量化后的剩余瓶颈 + 复现脚本 + 已排除方向 |
 | **12** | [**FlagGems 接入说明**](12-flaggems-integration.md) | — | **后续算子优化的入口**：开关怎么开、怎么验证生效、实测为何还不可用 |
+| **13** | [**拖累算子清单**](13-bottleneck-ops.md) | — | **交给算子适配方**：按占差距排好序，含 kernel 名与调用次数 |
 
 > 07-09 每份都含：训练耗时、吞吐（含最快/最慢/平均）、完整检索指标（含 nDCG）、
 > docx §4 达标判定、**算子级剖析**（哪些算子拖慢、FlagGems 里有没有实现、
 > 怎么接入）。
 >
-> **FlagGems 现状（实测，详见 [12](12-flaggems-integration.md)）**：
+> **FlagGems 现状（两平台都已实测，详见 [12](12-flaggems-integration.md)）**：
 > - 配置开关 `train.hardware.use_flaggems` **以前是死配置**（只写环境变量、
 >   无人读取），现已接通并由 `flagscale/train/utils/flaggems.py` 读取。
-> - 昆仑芯：**10 个算子里 9 个比原生更慢**（`sum` 0.03×、`layer_norm` 0.04×）。
-> - 昆仑芯真实训练**跑不起来**：`sub` 的 CPU 标量路径崩、SDPA 不支持
->   dropout、单独开 GELU 触发 `error 719` GPU 异常。
+> - 昆仑芯（flag_gems 5.4.0 已装）：**10 个里 9 个更慢**（`sum` 0.03×、
+>   `layer_norm` 0.04×、GELU 0.65×），且真实训练**跑不完**——`sub` 的 CPU
+>   标量路径崩、SDPA 不支持 dropout、单开 GELU 触发 `error 719`。
+> - PPU（flag_gems 5.4.0 已装）：**13 个里 12 个更慢，GEMM 持平 0.99×**。
+> - **结论：换 FlagGems 不是提速路径。**拖累算子必须由厂商在原生 kernel 层解决，
+>   名单见 [13](13-bottleneck-ops.md)。
 > - **所以本文档所有吞吐数字都是 `use_flaggems=false` 的基线。**
 >
 > **优化目标必须按真实配置的整步 profiler 归因**（微基准和小 batch 外推都会给出
