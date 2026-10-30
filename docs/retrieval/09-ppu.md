@@ -38,8 +38,10 @@
 > **这个系数把结论翻转过来了**：按系数=1 时三项全不达标，
 > 按芯片真实微基准算，CLIP 与 Reranker 都达标，BGE 只差 0.12 样本/s。
 
-> 用真实系数判定后，只有 BGE 差一点点。它的瓶颈在 `bmm`（慢 15.3×）之外的
-> 通用归约与归一化路径，属于 FlagGems 的覆盖范围。
+> 用真实系数判定后，只有 BGE 差一点点。实测归因（见「算子级剖析」）显示
+> 它的差距不在归约或归一化——`sum` 只慢 1.1×、`layer_norm` 反而快 1.7×
+> 而在 **GEMM 吞吐（1.6-1.8×，占差距 44%）和 attention 无融合内核
+> （占 20%）**。这两项都不在 FlagGems 的覆盖范围内，需要厂商支持。
 
 ## 二、BGE-M3（568M，1 卡，3 epoch）
 
@@ -244,8 +246,11 @@ FlagGems 的 `backends.yaml` 里 **`thead`（平头哥 PPU）也是官方后端*
 | `gelu` | ✅ `ops/gelu.py`（99 行） | — | ✅ `fused/gelu_and_mul.py` |
 | `layer_norm` | ✅ `ops/native_layer_norm.py` | — | ✅ `fused/post_layer_norm_residual.py`<br>✅ `fused/skip_layernorm.py` |
 
-**`bmm` 是 PPU 的 P0（慢 15.3×）**，而 `_thead/ops/bmm.py` 是 PPU 专用的实现，
-`mm_ppu_expand.yaml` 里还有 661 行的矩阵乘调优展开——**正是针对这类问题做的**。
+微基准曾把 `bmm` 列为 PPU 的 P0（15.3×），`_thead/ops/bmm.py` 也确实有 PPU 专用实现。
+**但真实 step 里 `bmm` 合计 347.6 ms/步、占总时间 13.7%**（不是 15.3× 那种量级），
+且它主要来自 attention 回退到 math 路径（见上一节），
+换成 FlagGems 的 `bmm` 不会让 attention 变成 fused 实现。
+**所以 FlagGems 的 bmm 不值得作为 PPU 的优化入口。**
 
 ### 接入的可行性：比昆仑芯好
 
@@ -275,9 +280,10 @@ vendor_info = VendorDescriptor(
 
 ### 预期收益（按算子占比推算）
 
-CLIP 的 GEMM 占 52%，剩余 48% 里 `bmm` 是核心。若把 `sum`（18.6×）、
-`bmm`（15.3×）、`gelu`（11.2×）、`layer_norm`（7.6×）追到 1.5× 以内，
-非 GEMM 部分提速约 **2.9×**，整体从 58.1% 到 **~80%**，刚好过门槛。
+> **这段推算基于已作废的微基准口径，不再成立。** 按真实 step 实测，
+> `sum` 只慢 1.1×、`layer_norm` 反而快 1.7×、`gelu` 快 1.1×——三个都不是问题；
+> 真正占差距的是 GEMM（44.3%）和 attention（20.4%），两者都需要厂商支持，
+> **换 elementwise 算子达不到 80%。**
 
 ### 附：fp32 GEMM 与折扣系数
 
@@ -290,82 +296,131 @@ CLIP 的 GEMM 占 52%，剩余 48% 里 `bmm` 是核心。若把 `sum`（18.6×�
 
 ## 算子级剖析：真实 step 归因
 
-> ⚠️ **本节的三方对比表（batch 4 × seq 512）用的是"小 batch profile × 10 外推"
-> 的口径，这个口径已被证伪，数字只作历史记录。**
-> 硬证据：A100 用同样的方法算出 25.25 ms × 10 = **252 ms/step**，
-> 但用真实配置实测是 **1,419 ms/step**（profiler 单层合计；分段实测 fwd+bwd 是 1,504 ms）——**低估 5.6 倍**。
-> 原因有两个：(a) 合成输入只有 115 token，真实 padded 均值是 299；
-> (b) `aten::` 层和底层 kernel 层都报 device time，相加会翻倍。
-> PPU 那列（110.76 × 10 = 1,108 ms）是同一个错误口径的产物。
-> 注意 1,108 ms 几乎等于 A100 的实测 kernel 时间，而 PPU 的 wall clock 只有 A100 的 1.87 倍——
-> 单凭这一点就能看出那套外推不成立。
->
-> **PPU 至今没有真实配置的实测**（本文写作时 VPN 断线，无法连机器）。
-> 待补：在 PPU 上跑 `examples/retrieval/profile_step_segments.py`，与 07/08 的 A100、
-> 昆仑芯数字同口径对比。
+口径与 07/08 完全一致：`examples/retrieval/profile_step_segments.py`，
+真实 conf（batch 10 × accum 4 = **200 texts/step**，padded 均值 299），
+计时阶段不开 profiler，profile 阶段连跑 4 步取平均。
 
-**PPU 的 profiler 有一个坑**（这个结论仍然成立）：它同时输出 `aten::` 层和
-底层 kernel 层，两者相加正好等于报告的总时间——**是同一份工作的重复计数**。
+**PPU 的 profiler 有一个坑**：它同时输出 `aten::` 层和底层 kernel 层，
+两者相加正好等于报告的总时间——**是同一份工作的重复计数**。
 必须只取一层。本文取 `aten::` 层。
 
-### PPU 的逐 op 明细（aten 层，batch 4 合成输入，前 10）
+### 阶段拆解（A100 vs PPU）
 
-| op | 调用/步 | ms | 占比 |
+| 项 | A100 | PPU | 倍数 |
 |---|---|---|---|
-| **`aten::mm`** | 1,444 | **43.73** | **19.3%** |
-| **`aten::addmm`** | 725 | **18.65** | **16.8%** |
-| `aten::sum` | 725 | 10.21 | 9.2% |
-| `aten::add_` | 1,758 | 7.93 | 7.2% |
-| `aten::bmm` | 720 | 7.81 | 7.1% |
-| `aten::_to_copy` | 1,120 | 4.54 | 4.1% |
-| `aten::clone` | 490 | 2.10 | 1.9% |
-| `native_layer_norm_backward` | 245 | 2.10 | 1.9% |
-| `aten::mul` | 616 | 1.86 | 1.7% |
-| `gelu_backward` | 120 | 1.24 | 1.1% |
+| **整 step 墙钟**（profiler 关闭） | **1,605 ms** | **2,549 ms** | **1.59×** |
+| forward（含 tokenize + H2D） | 667 ms（41.5%） | 1,066 ms（41.8%） | 1.60× |
+| backward | 948 ms（59.1%） | 1,557 ms（61.1%） | 1.64× |
+| clip + optimizer.step | 22 ms（1.4%） | 22 ms（0.9%） | 1.0× |
+| tokenize（在 forward 内） | 107 ms（6.7%） | **67 ms（2.6%）** | **0.63×** |
+| H2D（在 forward 内） | 2.7 ms（0.2%） | 0.8 ms（0.03%） | 0.3× |
+| dataloader `next()` | 0.67 ms（0.04%） | **0.78 ms（0.03%）** | — |
+| **device 计算（fwd+bwd）** | **1,504 ms（93.7%）** | **2,556 ms（100.3%）** | 1.70× |
+| kernel 时间（profiler） | 1,419 ms（88.4%） | 2,531 ms（99.3%） | 1.78× |
 
-即使按这个不可靠的口径，**GEMM 类（`mm`+`addmm`+`bmm`）仍占 56% 以上**，
-这是 PPU 与昆仑芯最本质的不同：昆仑芯的头号是 GELU，PPU 的头号是小 GEMM。
+**PPU 是三个平台里最"纯"的：device 计算 100.3%、kernel 99.3% 的墙钟，
+dataloader 0.03%。** 它没有任何非计算开销可以挤压。
 
-### 两家的短板方向相反（定性结论，待 PPU 实测复核）
+顺带一个反直觉的点：**PPU 的 CPU 侧比 A100 快**——tokenize 只要 67 ms
+（A100 107 ms，昆仑芯 105 ms），所以它在 CPU 上更不是瓶颈。
 
-| | 昆仑芯（已实测） | PPU（旧口径） |
+### 三平台按语义归类的差距分解
+
+| 类别 | A100 | 昆仑芯 | PPU | PPU/A100 |
+|---|---|---|---|---|
+| **gemm**（`mm`+`addmm`） | 666.7 ms | 819.8 | **1,158.6** | **1.7×** |
+| **attention**（含 `bmm`/`softmax`） | 326.7 | 277.4 | **553.5** | **1.7×** |
+| elementwise | 111.7 | 152.1 | 254.5 | 2.3× |
+| copy/cast | 85.5 | 309.0 | 248.8 | 2.9× |
+| dropout | 21.0 | 57.4 | 123.3 | **5.9×** |
+| reduce | 51.6 | 91.5 | 54.5 | 1.1× |
+| norm | 76.5 | 61.2 | 45.2 | **0.6×（更快）** |
+| activation（GELU） | 40.5 | **1,028.9** | 36.8 | **0.9×（持平）** |
+| optimizer | 18.6 | 0 | 18.9 | 1.0× |
+| 其他 | 20.3 | 125.4 | 34.5 | — |
+| **合计** | **1,419.3** | **2,922.7** | **2,530.8** | **1.78×** |
+
+**PPU 相对 A100 的差距 +1,111 ms 分布：GEMM 44.3%、attention 20.4%、
+cast/copy 14.7%、elementwise 12.9%、dropout 9.2%。**
+
+### PPU 的逐 op 明细（aten 层，每步均值，前 12）
+
+| op | 调用/步 | ms/步 | 占比 | A100 同名 op |
+|---|---|---|---|---|
+| **`aten::mm`** | 5,776 | **813.1** | **32.1%** | 445.5（1.8×） |
+| **`aten::bmm`** | 2,880 | **347.6** | **13.7%** | 0（A100 走融合 attention） |
+| **`aten::addmm`** | 2,900 | **345.5** | **13.7%** | 221.2（1.6×） |
+| `aten::_to_copy` | 13,766 | 166.5 | 6.6% | ~0 |
+| `aten::add_` | 9,358 | 133.4 | 5.3% | 77.9（1.7×） |
+| `aten::mul` | 2,465 | 87.4 | 3.5% | 0.2（65 次） |
+| `_softmax_backward_data` | 480 | 67.9 | 2.7% | 0 |
+| `aten::native_dropout` | 1,460 | 62.9 | 2.5% | 13.6（980 次，4.6×） |
+| `native_dropout_backward` | 1,460 | 60.4 | 2.4% | 7.4（980 次，8.2×） |
+| `aten::sum` | 2,900 | 54.5 | 2.2% | 51.6（1.1×） |
+| `aten::where` | 500 | 53.5 | 2.1% | 4.9（10.8×） |
+| `aten::_softmax` | 480 | 53.4 | 2.1% | 0 |
+
+### PPU 没有融合 attention：影响有限，但确实存在
+
+A100 上 attention 是一对 `_efficient_attention_forward/backward`；
+**PPU 上完全没有这个算子**，SDPA 落到 math 后端，展开成
+`bmm` + `softmax` + `isneginf` + `where` + 额外的 `mul`：
+
+| 组件 | PPU ms/步 | 说明 |
 |---|---|---|
-| **头号问题** | **GELU，占差距 65.8%** | **小 GEMM（占总时间 56%）** |
-| GELU | **25.4× 慢** | 0.93×，持平 |
-| layer_norm | 0.80×，更快 | 0.70×，更快 |
-| 胶水 kernel | **cast/transpose 占差距 19%** | 较少（`_to_copy` 4.54 ms） |
-| flash attention | 0.88×，更快 | 被融合，单独看不出来 |
+| `bmm`（QKᵀ 与 PV） | 347.6 | A100 没有这个调用 |
+| `_softmax` + `_softmax_backward_data` | 121.3 | 反向占 67.9 |
+| `isneginf` | 31.1 | 只是判断掩码里有没有 -inf |
+| `where`（掩码） | 53.5 | A100 只花 4.9 |
+| `mul`（scale） | 87.4 | A100 只花 0.2（65 次 vs 2,465 次） |
+| **合计（含 mul）** | **641**（A100 326.7） |
 
-**同一个 BGE-M3，昆仑芯要治激活函数和 dtype 转换，PPU 要治小 GEMM 的
-launch 开销。** 这意味着两家的优化手段不能互换。
+> 上表按"attention 展开后的所有组件"计 641 ms，比文档其他处引用的 553.5 ms
+> （只算 bmm+softmax+isneginf+where，不含 `mul`）更宽。**选哪一个取决于
+> 是否把 `mul` 算进 attention** —— 为与 A100 的 `_efficient_attention`
+> 口径可比，正文统一用 **553.5 ms**（`mul` 计入 elementwise 类）。
 
+**但要澄清一个容易夸大的点**：单独测前向时，math 路径并不比 SDPA 慢
+（B=10,H=16,S=299,D=64：sdpa 0.24 ms，math 0.21 ms，都在同一量级）。
+所以"缺融合内核"主要影响**反向**（softmax_bwd 68 ms）和**掩码准备**
+（`isneginf`/`where`/额外 `mul`），不是前向算不动。
+把它当成 PPU 的头号问题会误判——它只占差距的 20%。
 
-### 优化优先级（PPU）
+### 与昆仑芯的关键差异：短板几乎不重叠
 
-| 优先级 | 目标 | 旧口径下的每步增量 | FlagGems 能补？ |
+| | 昆仑芯（已实测） | PPU（已实测） |
+|---|---|---|
+| **头号问题** | **GELU，占差距 65.8%（25.4×）** | **GEMM，占差距 44.3%（1.7×）** |
+| 第二 | cast/transpose 胶水 20.6% | attention math 回退 20.4% |
+| GELU | **25.4× 慢** | **0.9×，持平** |
+| layer_norm | 0.80×，更快 | **0.6×，更快** |
+| GEMM | 1.2×（不是问题） | **1.6-1.8×（头号）** |
+| attention | 0.86×，更快 | 1.7×（无融合内核） |
+| `aten::mm` 调用次数 | 3,468（分 kernel 计） | **5,776（与 A100 完全相同）** |
+
+**同一个 BGE-M3，两家要治的东西几乎不重叠**：昆仑芯治激活函数和 dtype 转换，
+PPU 治 GEMM 效率和 attention 回退。优化手段不能互换。
+
+### 优化优先级（PPU，按实测每步增量）
+
+| 优先级 | 目标 | 每步增量 | 能否自己做？ |
 |---|---|---|---|
-| **P0** | **`mm` + `addmm` + `bmm`**（70.19 ms，占 63.4%） | **+63.5 ms** | ❌ GEMM 不在 FlagGems 范围 |
-| P1 | `sum`（10.21 ms） | +9.4 ms | ✅ 有，但昆仑芯实测更慢 |
-| P2 | `add` / `_to_copy`（12.47 ms） | +11.0 ms | ✅ 有，实测更慢 |
+| **P0** | **`mm` + `addmm` 效率**（差 1.6-1.8×） | **+491.9 ms** | ❌ 需厂商 GEMM 库调优 |
+| **P1** | **attention 融合内核** | +226.8 ms | ⚠️ 需厂商或 Torch-FL 提供 fused SDPA |
+| P2 | cast/copy（`_to_copy`/`contiguous`/`clone`） | +163.3 ms | ⚠️ 需融合，属厂商 torch |
+| P2 | elementwise（`mul`/`where`/`add_`） | +142.8 ms | ✅ FlagGems 有，但昆仑芯实测更慢 |
+| P3 | dropout（4.6-8.2×） | +102.4 ms | ⚠️ 需厂商 |
 | — | `gelu` / `layer_norm` | **PPU 上比 A100 快**，不动 | — |
 
-> 上表的绝对毫秒数来自已证伪的 batch-4 外推口径，**只用来看相对顺序**。
-> 真实占比待 PPU 实测补齐。
-
-**PPU 的瓶颈是 1,444 次 `mm` 调用 + 725 次 `addmm`**，这些是小矩阵乘
-（batch 4 的 encoder），走的是 `gemm_ktype0_aiu1_...` 内核。
-这类形状的 GEMM 效率问题要靠厂商的 GEMM 库调优，**不是换 elementwise 算子能解决的**。
-
-> 注：PPU 的折扣系数是 0.711（比昆仑芯的 1.321 低），门槛更松，
-> 所以即使慢 4.39×，CLIP 与 reranker 仍然达标、BGE 只差 0.18%
-> （见 `10-microbench-discount.md`）。**这里的 4.39× 同样来自被证伪的口径，
-> 不要引用为定论。**
+> 注：`mm`/`addmm` 的调用次数与 A100 **完全相同**（5,776 / 2,900），
+> 所以这不是"小 GEMM 调用太多"的问题，而是**同等次数下每次都更慢**。
+> 这修正了早前"PPU 小 GEMM 调用过多"的说法。
 
 ### 一个查证过的否定项：`mm_ppu_expand.yaml` 帮不上忙
 
 FlagGems 的 `_thead/mm_ppu_expand.yaml` 有 **661 行**矩阵乘调优参数，
 按形状分了 18 组（`mm_ppu` / `mm_ppu_small_m` / `mm_ppu_narrow_n` /
-`bmm_ppu` / `gemv_ppu` / `mm_ppu_split_k` ...），看起来正对着 PPU 的小 GEMM 问题。
+`bmm_ppu` / `gemv_ppu` / `mm_ppu_split_k` ...），看起来正对着 PPU 的 GEMM 效率问题。
 
 **但它对原生 `aten::mm` 无效。** 这些是 FlagGems **自己 Triton kernel** 的
 `BLOCK_M/BLOCK_N/BLOCK_K/num_warps/num_stages` 调参，只在
@@ -375,30 +430,34 @@ FlagGems 的 `_thead/mm_ppu_expand.yaml` 有 **661 行**矩阵乘调优参数，
 
 | 事实 | 结果 |
 |---|---|
-| FlagGems 的 `mm` 在昆仑芯上 | 0.52× （微基准）/ 未测 PPU |
-| PPU 真实 step 的 `mm` 调优 | ❌ 走的是 `gemm_ktype0_aiu1_...`，厂商 XBLAS 内核 |
+| FlagGems 的 `mm` 在昆仑芯上 | 0.52×（微基准，全平台实测见 08） |
+| PPU 真实 step 的 `mm` 实现 | ❌ 走的是 `gemm_ktype0_aiu1_...`，厂商 XBLAS 内核 |
 
-所以 **PPU 的小 GEMM 问题只能靠厂商 XBLAS 解决**，改 FlagGems 的 yaml 没有用。
+所以 **PPU 的 GEMM 效率问题只能靠厂商 XBLAS 解决**，改 FlagGems 的 yaml 没有用。
 
 ## PPU BGE 达标 99.8%：这个数字怎么读
 
 BGE 的吞吐是 **66.6 texts/s，达门槛 99.8%**（门槛 = 118.0 × 0.711 × 0.8 = 67.1）。
 
-### 分解（A100 已实测，PPU 为旧口径）
+### 分解（两个平台都已实测）
 
 BGE 配置 `batch_size 10 × grad_accum 4` = **40 行/step = 200 texts/step**，
 共 23,010 step。
 
-| 项 | A100（实测） | PPU（旧口径 ※） | 倍数 |
+| 项 | A100（实测） | PPU（实测） | 倍数 |
 |---|---|---|---|
-| **整 step 墙钟** | **1,605 ms** | 3,004 ms | 1.87× |
-| 其中 **device 计算（fwd+bwd）** | **1,504 ms（93.7%）** | 未实测 | — |
-| 其中 tokenize | 107 ms（6.7%） | 未实测 | — |
-| 其中 dataloader | 0.67 ms（0.04%） | 未实测 | — |
-| 吞吐 | 117.9 texts/s | 66.6 texts/s | 0.56× |
+| **整 step 墙钟** | **1,605 ms** | **2,549 ms** | 1.59× |
+| 其中 **device 计算（fwd+bwd）** | **1,504 ms（93.7%）** | **2,556 ms（100.3%）** | 1.70× |
+| 其中 tokenize | 107 ms（6.7%） | 67 ms（2.6%） | **0.63×** |
+| 其中 dataloader | 0.67 ms（0.04%） | 0.78 ms（0.03%） | — |
+| kernel（profiler 单层） | 1,419 ms | 2,531 ms | **1.78×** |
+| 吞吐（整轮训练实测） | 117.9 texts/s | 66.6 texts/s | **1.77×** |
 
-※ PPU 的 step 墙钟来自同日训练日志，但**没有做过同口径的阶段拆解**
-（写作时 VPN 断线）。A100 那列是 `examples/retrieval/profile_step_segments.py` 的实测值。
+> 实测 step 墙钟比（1.59×）与整轮吞吐比（1.77×）差 11%。这个差是可算的：
+> 23,010 步 × 200 texts 按整轮吞吐反推总耗时，A100 39,033 s、PPU 69,099 s；
+> 扣掉纯 step 时间（36,931 s / 58,652 s）后，**训练 step 之外的开销**
+> （验证、最终测试、启动）占 A100 的 **5.4%**、PPU 的 **15.1%**。
+> PPU 的评测阶段开销是 A100 的近 3 倍，具体原因未单独测量。
 
 ### 旧解释作废：并不是"非 kernel 开销把差距稀释了"
 
@@ -414,22 +473,24 @@ batch 4 合成输入的 profile（25.25 ms）× 10 算出的 252 ms，
 所以正确的读法应该是：
 
 1. **端到端吞吐 99.8% 是合法的达标**（docx 按墙钟定义），这一点没变。
-2. **但没有"优化数据管线就能让 PPU 掉出达标"这回事**——数据管线只占 0.04%，
-   动它不会改变任何东西。
-3. **PPU 的 kernel 效率到底差多少，目前没有可信数字。** 旧口径的 4.39×
-   和 22.8%，都来自同一套错误外推，不应再引用。
-4. 唯一可信的相对结论是 **PPU 的短板在小 GEMM**（`mm`+`addmm`+`bmm`
-   占 aten 层 56% 以上），这个排序在两种口径下都一致。
+2. **但没有"优化数据管线就能让 PPU 掉出达标"这回事**——PPU 的数据管线只占 0.03%，
+   动它不会改变任何东西。反过来，PPU 也没有任何非计算开销可以挤压。
+3. **PPU 的 kernel 效率现在有可信数字了**：整步 2,531 ms（A100 1,419 ms，**1.78×**），
+   而 step 墙钟只慢 1.59×。达标之所以成立，是因为 docx 的门槛
+   （A100 × 0.711 × 0.8）本身就留了 44% 的余量，不是因为 PPU 快到接近 A100。
+4. 差距的分布：GEMM 44.3%、attention 20.4%、cast/copy 14.7%、
+   elementwise 12.9%、dropout 9.2%。**GELU 和 layer_norm 在 PPU 上比 A100 快。**
 
-### 待补的实测
+### 复现命令
 
-在 PPU 上跑同一份脚本即可对齐口径：
+本文所有 PPU 数字由下面这条命令产生（在 `flagos-retrieval-bge` 容器内）：
 
 ```bash
 python examples/retrieval/profile_step_segments.py \
   --conf examples/retrieval/conf/train/bge_m3.yaml \
-  --steps 3 --skip 2 --device flagos --out ppuseg.json
+  --steps 6 --skip 4 --prof-steps 4 --device flagos --out ppuseg.json
 ```
 
-拿到 PPU 的真实 device 计算占比之前，**本文档不给 PPU 的 kernel 级倍数结论**。
+其中 `--steps 6` 是计时步数（不开 profiler），`--prof-steps 4` 是 profile 步数
+（其计时结果丢弃，只取算子归因）。
 

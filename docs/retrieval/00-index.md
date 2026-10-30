@@ -134,28 +134,37 @@
 ## 一个容易混淆的点：kernel 慢 ≠ 吞吐慢
 
 profiler 的「每 step device 时间」和 docx 的「吞吐」是两个口径。下表的
-A100 / 昆仑芯两列来自**按阶段实测**（`examples/retrieval/profile_step_segments.py`，
+三列均来自**按阶段实测**（`examples/retrieval/profile_step_segments.py`，
 BGE-M3 真实配置 batch 10 × accum 4 = 200 texts/step）：
 
 | | BGE-M3 A100 | 昆仑芯 | PPU |
 |---|---|---|---|
-| 整 step 墙钟 | **1,605 ms** | **3,262 ms**（2.03×） | 3,004 ms（1.87×）※ |
-| 其中 device 计算（fwd+bwd） | **1,504 ms（93.7%）** | **3,132 ms（96.0%）** | 未实测 |
-| 其中 tokenize | 107 ms（6.7%） | 105 ms（3.2%） | 未实测 |
-| 其中 **dataloader** | **0.67 ms（0.04%）** | **1.11 ms（0.03%）** | 未实测 |
-| 其中 clip + optimizer | 22 ms（1.4%） | 62 ms（1.9%） | 未实测 |
-| 吞吐 | 117.9 texts/s | 54.0（45.8%） | 66.6（56.6%） |
-
-※ PPU 一列是**旧口径**（同日 wandb 墙钟；VPN 断线，未能用新脚本重测）。
+| 整 step 墙钟 | **1,605 ms** | **3,262 ms**（2.03×） | **2,549 ms**（1.59×） |
+| 其中 device 计算（fwd+bwd） | **1,504 ms（93.7%）** | **3,132 ms（96.0%）** | **2,556 ms（100.3%）** |
+| 其中 tokenize | 107 ms（6.7%） | 105 ms（3.2%） | **67 ms（2.6%）** |
+| 其中 **dataloader** | **0.67 ms（0.04%）** | **1.11 ms（0.03%）** | **0.78 ms（0.03%）** |
+| 其中 clip + optimizer | 22 ms（1.4%） | 62 ms（1.9%） | 22 ms（0.9%） |
+| kernel（profiler 单层） | 1,419 ms | 2,923 ms | 2,531 ms |
+| 吞吐（整轮训练） | 117.9 texts/s | 54.0（45.8%） | 66.6（56.6%） |
 
 **之前这里写的是"两个 step 都被非 kernel 开销主导"，那是错的。**
 旧数字（A100 kernel 252 ms = 15%、昆仑芯 1,751 ms = 47%）是拿
 「batch 4 × seq 512 的合成 batch、一次 forward+backward」的 profile
 乘以调用次数外推出来的，而且把 aten 层和 kernel 层重复相加了。
-按真实配置实测，**两个平台的 step 都有 94-96% 在 device 计算里**，
-数据管线只占 0.04%。
+按真实配置实测，**三个平台的 step 都有 94-100% 在 device 计算里**，
+数据管线只占 0.03-0.04%。
 
 由此得到一个更明确的结论：**这个 workload 的瓶颈就是算子，不是数据管线。**
 优化算子是对的方向；把 num_workers 调大、给 collate 上缓存几乎不会有收益
-（可优化空间上限就是那 6% 的 tokenize）。
+（可优化空间上限就是那 7% 的 tokenize）。
+
+**三家的短板几乎不重叠**（按占差距的比例）：
+
+| 平台 | 头号 | 第二 | 第三 | 反而更快的 |
+|---|---|---|---|---|
+| 昆仑芯 | GELU **65.8%** | cast/transpose 20.6% | GEMM 10.2% | attention 0.86×、norm 0.80× |
+| PPU | GEMM **44.3%** | attention 20.4% | cast/copy 14.7% | GELU 0.9×、norm 0.6× |
+
+所以**不能用一套优化手段同时打两家**：昆仑芯的 GELU 是 bug 级的 25×，
+PPU 的 GEMM 是 1.7× 的效率差，且调用次数与 A100 完全相同。
 
