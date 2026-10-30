@@ -32,12 +32,15 @@
 >   `layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
 > - PPU：还没试。
 >
-> **优化目标必须按真实 step 的 profiler 归因**（微基准会给出错误排序，详见 08）。
-> 昆仑芯 BGE 真实 step 25.25 → 175.14 ms（6.94×），增量集中在：
-> **`gelu` +36.34 ms（22%，走了 fp32 highprecision 路径）**、
-> **胶水 kernel +58.31 ms（33%，`cast_te`/`findmax1d`/`tensor_calc_basic`/`transpose`，
-> A100 上不存在）**、gemm +32.38 ms。
-> `flash_attention` 只有 1.26×（占 1%），**不是瓶颈**——早前微基准的结论是错的。
+> **优化目标必须按真实配置的整步 profiler 归因**（微基准和小 batch 外推都会给出
+> 错误排序，详见 08）。昆仑芯 BGE 真实 step **1,482 → 3,093 ms（2.09×）**，
+> 差距集中在：**GELU +1,055 ms（占差距 65.5%，慢 25.8×，走了 fp32
+> `_highprecision` 路径）**、**dtype 转换/转置胶水 +305 ms（19%）**、
+> gemm +174 ms（10.8%）。`flash_attention` 只有 0.88×（反而更快），
+> `layer_norm` 0.80×（更快），**都不是瓶颈**。
+>
+> **step 里 86-89% 的时间是 device 计算，dataloader 只占 0.04%，
+> tokenize 占 3-6%。瓶颈在算子，不在数据管线。**
 >
 > **全部结果均未引入 FlagGems**（`use_flaggems=false`），属未优化基线。
 
@@ -130,19 +133,29 @@
 
 ## 一个容易混淆的点：kernel 慢 ≠ 吞吐慢
 
-profiler 的「每 step kernel 时间」和 docx 的「吞吐」是两个口径：
+profiler 的「每 step device 时间」和 docx 的「吞吐」是两个口径。下表的
+A100 / 昆仑芯两列来自**按阶段实测**（`examples/retrieval/profile_step_segments.py`，
+BGE-M3 真实配置 batch 10 × accum 4 = 200 texts/step）：
 
-| | BGE-M3 A100 | PPU | 昆仑芯 |
+| | BGE-M3 A100 | 昆仑芯 | PPU |
 |---|---|---|---|
-| 整 step 墙钟 | 1,696 ms | 3,004 ms（1.77×） | 3,703 ms（2.18×） |
-| 其中 kernel | 252 ms（**15%**） | 1,108 ms（37%，4.39×） | 1,751 ms（47%，6.94×） |
-| 其中非 kernel | 1,443 ms（**85%**） | 1,897 ms（63%，1.31×） | 1,952 ms（53%，1.35×） |
-| 吞吐 | 117.9 texts/s | 66.6（56.6%） | 54.0（45.8%） |
+| 整 step 墙钟 | **1,830 ms** | **3,368 ms**（1.84×） | 3,004 ms（1.64×）※ |
+| 其中 device 计算（fwd+bwd） | **1,566 ms（85.6%）** | **3,012 ms（89.4%）** | 未实测 |
+| 其中 tokenize | 110 ms（6.0%） | 107 ms（3.2%） | 未实测 |
+| 其中 **dataloader** | **0.7 ms（0.04%）** | **1.1 ms（0.03%）** | 未实测 |
+| 其中 clip + optimizer | 22 ms（1.2%） | 63 ms（1.9%） | 未实测 |
+| 吞吐 | 117.9 texts/s | 54.0（45.8%） | 66.6（56.6%） |
 
-**所以 PPU 的 99.8% 达标是合法的**（docx 的吞吐按端到端墙钟算），
-**但很薄**：它的 kernel 层面还差 4.39×，只是被「非 kernel 开销占比高」掩盖了。
-若把非 kernel 开销消掉（加大 batch、加 worker、上缓存），PPU 反而会掉出达标。
+※ PPU 一列是**旧口径**（同日 wandb 墙钟；VPN 断线，未能用新脚本重测）。
 
-反过来看：**BGE 在 A100 上 85% 的时间不在 kernel 里**，
-说明这个 workload 的端到端瓶颈其实在数据管线。优化数据管线对两个平台同时有效，
-收益比换算子更直接。
+**之前这里写的是"两个 step 都被非 kernel 开销主导"，那是错的。**
+旧数字（A100 kernel 252 ms = 15%、昆仑芯 1,751 ms = 47%）是拿
+「batch 4 × seq 512 的合成 batch、一次 forward+backward」的 profile
+乘以调用次数外推出来的，而且把 aten 层和 kernel 层重复相加了。
+按真实配置实测，**两个平台的 step 都有 86-89% 在 device 计算里**，
+数据管线只占 0.04%。
+
+由此得到一个更明确的结论：**这个 workload 的瓶颈就是算子，不是数据管线。**
+优化算子是对的方向；把 num_workers 调大、给 collate 上缓存几乎不会有收益
+（可优化空间上限就是那 6% 的 tokenize）。
+
