@@ -466,9 +466,26 @@ FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yam
 `gelu_and_mul` / `silu_and_mul` 把 SwiGLU 的两次 elementwise 合成一次。
 按 A100 上 elementwise+reduce 占 18% 算，这类融合能再省掉一部分。
 
-### 接入实测：装上了，**但 FlagGems 在昆仑芯上全面更慢**
+### 接入实测：装上了，**但 FlagGems 在昆仑芯上全面更慢，且真实训练跑不起来**
 
 这是本轮最重要的一条负面结果。装和调都通了，实测却没有一处变快。
+
+> **先纠正一个前提**：`train.hardware.use_flaggems` 在此之前是**死配置**——
+> 它只被插值成环境变量 `FLAGOS_USE_FLAGGEMS`，没有任何代码读取，设成 true
+> 也不生效。现已由 `flagscale/train/utils/flaggems.py` 接通
+> （见 [12-flaggems-integration.md](12-flaggems-integration.md)）。
+>
+> **接通后的真实训练结果（batch 10 × accum 4）**：
+>
+> | 配置 | 结果 |
+> |---|---|
+> | 关闭 | **3,388 ms/step，59.0 samples/s** |
+> | 全量开启（只排 `sub` + SDPA） | ❌ **卡死**：JIT 编译 23 分钟不返回，CPU 100% |
+> | 只开 GELU（其余全 exclude） | ❌ **`error code= 719`** GPU kernel exception |
+>
+> 三个兼容性 bug：`sub` 对 CPU 标量张量取 `device.index`（None）崩溃、
+> FlagGems 的 SDPA 不支持 `dropout_p>0`、`gelu` 反向在 bf16 下触发 kernel 异常。
+> **换句话说：不是"开了变慢"，是当前版本根本跑不完。**
 
 #### 安装与注册：全部成功
 

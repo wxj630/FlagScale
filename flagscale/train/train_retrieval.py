@@ -71,6 +71,7 @@ from flagscale.models.retrieval import build_retrieval_model, unwrap_model
 from flagscale.train.datasets.retrieval import build_split_loaders
 from flagscale.train.losses.retrieval import loss_for_batch
 from flagscale.train.utils import parallel as parallel_utils
+from flagscale.train.utils.flaggems import enable_flaggems
 
 try:
     from flagscale.platforms import get_platform
@@ -933,6 +934,10 @@ def train(config: DictConfig) -> None:
     seed = int(train_cfg.get("seed", 42))
     deterministic = _as_bool(train_cfg.get("deterministic", False))
     seed_everything(seed, rank, device, platform, deterministic=deterministic)
+    # Register FlagGems kernels before any model op runs: registration patches
+    # the aten dispatch table for the whole process and cannot be undone, so it
+    # has to precede the first forward (and any CUDA-graph capture).
+    enable_flaggems(train_cfg.get("hardware", {}), device, platform)
     seed_record = reproducibility_record(seed, rank, world_size, device, platform, deterministic)
     if rank_zero():
         log(

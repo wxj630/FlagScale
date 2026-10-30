@@ -319,7 +319,13 @@ FlagGems 的 `backends.yaml` 里 **`thead`（平头哥 PPU）也是官方后端*
 换成 FlagGems 的 `bmm` 不会让 attention 变成 fused 实现。
 **所以 FlagGems 的 bmm 不值得作为 PPU 的优化入口。**
 
-### 接入的可行性：比昆仑芯好
+### 接入的可行性：比昆仑芯好（但未在 PPU 上实测）
+
+> ⚠️ **PPU 上还没跑过 FlagGems 的真实训练**。下面是静态分析（后端声明、
+> Triton 版本），不是实测结果。昆仑芯的实测结论是"全量开启会卡死 + 三个
+> 兼容性 bug"，PPU 走同一套 FlagGems 代码，**很可能遇到同样的 `sub` 标量
+> 路径与 SDPA dropout 问题**，需要先验证。
+> 接入开关的用法见 [12-flaggems-integration.md](12-flaggems-integration.md)。
 
 FlagGems 的 thead 后端声明：
 

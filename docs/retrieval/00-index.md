@@ -21,16 +21,19 @@
 | **09** | [**PPU ZW810E 结果**](09-ppu.md) | — | **精度 ✅ 99.9-100.1%；吞吐 CLIP ✅ / Reranker ✅ / BGE 差 0.18%** |
 | **10** | [**微基准与折扣系数**](10-microbench-discount.md) | — | 六家芯片实测 bf16/带宽 → 折扣系数（含/不含 FP32 两口径） |
 | **11** | [**给厂商的问题清单**](11-vendor-questions.md) | — | 量化后的剩余瓶颈 + 复现脚本 + 已排除方向 |
+| **12** | [**FlagGems 接入说明**](12-flaggems-integration.md) | — | **后续算子优化的入口**：开关怎么开、怎么验证生效、实测为何还不可用 |
 
 > 07-09 每份都含：训练耗时、吞吐（含最快/最慢/平均）、完整检索指标（含 nDCG）、
 > docx §4 达标判定、**算子级剖析**（哪些算子拖慢、FlagGems 里有没有实现、
 > 怎么接入）。
 >
-> **FlagGems 现状（实测）**：
-> - 昆仑芯：厂商 Triton（`3.6.0+gitcd2d6c1b`，带 `language/extra/xpu`）与
->   flag_gems 都能装；但**实测 10 个算子里 9 个比原生更慢**（`sum` 慢 37×、
->   `layer_norm` 慢 26×），**换 kernel 这条路在昆仑芯上不成立**。
-> - PPU：还没试。
+> **FlagGems 现状（实测，详见 [12](12-flaggems-integration.md)）**：
+> - 配置开关 `train.hardware.use_flaggems` **以前是死配置**（只写环境变量、
+>   无人读取），现已接通并由 `flagscale/train/utils/flaggems.py` 读取。
+> - 昆仑芯：**10 个算子里 9 个比原生更慢**（`sum` 0.03×、`layer_norm` 0.04×）。
+> - 昆仑芯真实训练**跑不起来**：`sub` 的 CPU 标量路径崩、SDPA 不支持
+>   dropout、单独开 GELU 触发 `error 719` GPU 异常。
+> - **所以本文档所有吞吐数字都是 `use_flaggems=false` 的基线。**
 >
 > **优化目标必须按真实配置的整步 profiler 归因**（微基准和小 batch 外推都会给出
 > 错误排序，详见 08）。昆仑芯 BGE 真实 step **1,419 → 2,923 ms（2.06×）**，

@@ -110,7 +110,23 @@ train:
     device_type: ${oc.env:FLAGSCALE_DEVICE,cuda}
     distributed_backend: auto
     autocast_device: auto
-    use_flaggems: false
+    # FlagGems replaces aten kernels with its own Triton implementations, which
+    # is where every later operator optimisation lands. Read by
+    # flagscale/train/utils/flaggems.py. The runner scripts leave it false so
+    # the throughput baseline in docs/retrieval stays "vendor kernels only".
+    use_flaggems: ${oc.env:FLAGOS_USE_FLAGGEMS,false}
+    # Per-vendor backend name. Empty means auto-detect; PPU needs `thead`
+    # because Torch-FL exposes the device as torch.cuda.
+    flaggems_vendor: ${oc.env:GEMS_VENDOR,}
+    # null = let FlagGems load the vendor's own enable_configs.yaml. A list, or
+    # a YAML path with an `exclude:` key, disables specific ops.
+    flaggems_exclude: null
+    # Where Triton/FlagGems JIT artefacts go. Empty derives a path beside the
+    # output dir; FlagGems' default (~/.flaggems) fails on hosts with a full home.
+    flaggems_cache_dir: ${oc.env:FLAGGEMS_CACHE_DIR,}
+    # true = raise when use_flaggems is set but cannot be honoured, instead of
+    # silently training on unoptimised kernels.
+    flaggems_required: true
   system:
     checkpoint:
       save: ${train.output_dir}
