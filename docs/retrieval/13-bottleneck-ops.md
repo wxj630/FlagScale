@@ -160,3 +160,62 @@ export XPU_ENABLE_PROFILER_TRACING=1 XPU_CUPTI_ENABLE_DEVICE=0
 每个数字的完整明细（含全部 kernel 名与调用次数）见
 [08-kunlunxin.md](08-kunlunxin.md) 与 [09-ppu.md](09-ppu.md) 的
 「算子级剖析」章节。
+
+
+---
+
+## 六、附：A100 reranker 的 "loss 发散" 是怎么回事（与本清单无关，但必须记录）
+
+排查拖累算子时顺带确认：**A100 reranker 的"发散"有两个独立原因，都不是算子问题。**
+
+### 原因 1：FSDP2 checkpoint 完全无法加载（真 bug，已修）
+
+`checkpoint-epoch-1/2` 保存时有两个缺陷，写盘时都不报错：
+
+| 缺陷 | 证据 |
+|---|---|
+| 所有键带 `backbone.` 前缀 | 399/399 键形如 `backbone.model.layers.*`，而 HF 加载器要 `model.layers.*` |
+| **所有张量被展平成 1-D** | rank 分布 `{1: 399}`；`[12288,4096]` 存成 `[50331648]` |
+
+后果：`from_pretrained` 报告 **399/399 MISSING**，评测载入的是**随机初始化**的模型。
+同一验证集上 base = **0.4286** BCE，"训练后" = **0.9417** —— 比 ln2（0.693，瞎猜）还差，
+这正是随机权重的表现，**不是过拟合**。
+
+修复见 `flagscale/train/train_retrieval.py`（剥前缀 + 按模型参数 reshape + 数量校验，
+不匹配直接报错而不是静默写坏）。已有快照用
+`examples/retrieval/repair_fsdp2_checkpoint.py` 离线修复。
+
+> 另注：`lm_head` / `embed_tokens` 多出 4095 个尾部元素（621,240,319 vs 621,236,224），
+> 截断后形状吻合。
+
+### 原因 2：BCE 无界导致分数漂移（配方问题，未修）
+
+修复加载后重测（600 行验证集，同批数据）：
+
+| 模型 | pos 均值 | neg 均值 | 边际 | **配对准确率** |
+|---|---|---|---|---|
+| base | 0.971 | −2.076 | 3.048 | **86.5%** |
+| epoch-1 | 4.391 | −0.901 | 5.292 | **86.5%** |
+| epoch-2 | 7.153 | −2.088 | 9.242 | **88.5%** |
+
+**分数绝对值在爆炸（0.97 → 4.39 → 7.15），但配对准确率几乎不动。**
+百分位分析给出机制：
+
+| | base | epoch-1 | epoch-2 |
+|---|---|---|---|
+| 正例被判负 | 22.3% | **3.7%** | 4.5% |
+| **负例被判正** | 12.5% | **44.5%** | 37.3% |
+| BCE | 0.461 | 0.677 | 0.991 |
+
+即：**正例越训越好，负例越训越差**，BCE 被负例那一侧拖爆。
+`F.binary_cross_entropy_with_logits` 没有 margin 约束，把分数推向 ±∞ 可以无成本降 loss，
+而排序不变。T²-Ranking 里 `negative_1` 仅 22% 唯一，单负例的梯度信号既弱又重复。
+
+### 续训
+
+已从修复后的 epoch-2（配对准确率最高）续训 1 epoch，lr 2e-6：
+`examples/retrieval/train-reranker-resume.sh`，输出 `reranker-resume-ep3`。
+
+> 监控注意：FlagScale 会把训练日志重定向到
+> `logs/exp-<name>/logs/details/.../stdout.log`，外层的
+> `logs/train-*.log` 只有启动信息。只看外层会误判成"卡住"。

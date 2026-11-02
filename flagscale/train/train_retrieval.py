@@ -305,7 +305,57 @@ def save_model(
                 "config/tokenizer files into the snapshot."
             )
         weights = {k.removeprefix("_orig_mod."): v for k, v in gathered.items()}
+        # Two layout problems made every FSDP2 snapshot unloadable, and neither
+        # raised an error at save time -- the damage only showed up as a bad
+        # validation loss later:
+        #
+        # 1. The gathered dict comes from the FlagScale *adapter*, so backbone
+        #    tensors carry a ``backbone.`` prefix while the snapshot is written
+        #    in the bare-HF layout that ``from_pretrained`` reads.
+        # 2. ``to_local()`` on a composable-FSDP2 DTensor returns the flattened
+        #    shard, so a [12288, 4096] weight arrived as [50331648].  Every
+        #    tensor was 1-D.
+        #
+        # Together they made the reload report 399/399 MISSING, so the evaluated
+        # model was randomly initialised.  That is what the first A100 reranker
+        # eval measured: base 0.429 BCE vs "trained" 0.942 on the same rows --
+        # worse than ln2, which is what random init looks like.
+        task_keys = {k: v for k, v in weights.items() if not k.startswith("backbone.")}
+        weights = {
+            k.removeprefix("backbone."): v
+            for k, v in weights.items()
+            if k.startswith("backbone.")
+        }
+        if not weights:
+            raise RuntimeError(
+                "FSDP2 checkpoint has no 'backbone.' tensors; refusing to write a "
+                "snapshot the upstream loader cannot read."
+            )
+        reference = {
+            k.removeprefix("backbone."): p.shape
+            for k, p in unwrap_model(model).named_parameters()
+            if k.startswith("backbone.")
+        }
+        restored, mismatched = {}, []
+        for key, tensor in weights.items():
+            want = reference.get(key)
+            if want is not None and tensor.shape != want and tensor.numel() == want.numel():
+                tensor = tensor.reshape(want)
+            elif want is not None and tensor.numel() != want.numel():
+                mismatched.append(f"{key}: {tuple(tensor.shape)} vs {tuple(want)}")
+            restored[key] = tensor
+        if mismatched:
+            raise RuntimeError(
+                "FSDP2 checkpoint cannot be reshaped to the model's parameters, so "
+                "the snapshot would not load:\n  " + "\n  ".join(mismatched[:5])
+            )
+        weights = restored
         save_file(weights, str(output_dir / "model.safetensors"))
+        # Task heads live outside the HF checkpoint (e.g. reranker score_head,
+        # VL projection).  Persist them next to the weights, matching what
+        # RetrievalModel.save_pretrained does on the non-sharded path.
+        if task_keys:
+            torch.save(task_keys, str(output_dir / "task_heads.pt"))
         for item in Path(source_dir).iterdir():
             if item.is_file() and item.name not in {
                 "model.safetensors",
