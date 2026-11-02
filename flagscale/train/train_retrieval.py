@@ -842,8 +842,15 @@ def _train_megatron(
 
     # A step budget is required: the pipeline schedule pulls from an iterator,
     # and an iterator that ends early on one rank deadlocks the others.
+    # `max_samples` has to reach this count, otherwise a smoke run advertises the
+    # full corpus's step budget and would train for days.  data_cfg caps the
+    # loaders separately, so both must agree or the plan and the data disagree.
     train_rows_total = count_split_rows(
-        data_path, "train", split_modulo=split_modulo, log=log
+        data_path,
+        "train",
+        split_modulo=split_modulo,
+        max_samples=data_cfg.get("max_samples"),
+        log=log,
     )
     rows_per_step = batch_rows * (1 + num_negatives)
     steps_per_epoch = max(1, train_rows_total // rows_per_step)
