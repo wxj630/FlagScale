@@ -178,15 +178,44 @@ def _score_processor(*, context, hidden_states, output_layer, **kwargs):
 
     lengths = context["lengths"]
     score_ids = context["score_token_ids"]
-    rows = int(context["rows"])
 
-    if hidden_states.size(0) == rows:
+    # Pick the sequence axis from the tensor, not from context["rows"].
+    #
+    # context["rows"] is len(pairs) on the rank that *built* the micro-batch.
+    # Every pipeline stage runs this processor, and a stage can be handed a
+    # micro-batch whose width differs from that record.  Measured on P800: the
+    # first eight calls had rows=2 / hidden=[128, 2, 4096] and matched, then the
+    # ninth arrived with rows=8 while the tensor still had batch 2 and raised
+    # "matches neither axis to rows=8".
+    #
+    # Sequence is whichever axis can hold the longest row; the batch axis must
+    # then equal len(lengths).  Testing the batch first is wrong: with
+    # hidden=[128, 2, 4096], need=128 and n_ctx=2, size(1)==n_ctx also holds, and
+    # transposing on that basis turned a 128-token sequence into width 2.
+    n_ctx = int(lengths.numel())
+    need = int(lengths.max())
+    a0, a1 = int(hidden_states.size(0)), int(hidden_states.size(1))
+    a0_seq, a1_seq = a0 >= need, a1 >= need
+    if a0_seq and not a1_seq:
+        hidden = hidden_states.float()                  # [s, b, h]
+    elif a1_seq and not a0_seq:
         hidden = hidden_states.transpose(0, 1).float()  # [b, s, h] -> [s, b, h]
-    elif hidden_states.size(1) == rows:
-        hidden = hidden_states.float()
+    elif a0_seq and a1_seq:
+        # Both can hold the prompt; only the batch axis disambiguates.
+        hidden = (
+            hidden_states.float()
+            if a0 == n_ctx
+            else hidden_states.transpose(0, 1).float()
+        )
     else:
         raise RuntimeError(
-            f"hidden_states {tuple(hidden_states.shape)} matches neither axis to rows={rows}"
+            f"hidden_states {tuple(hidden_states.shape)}: no axis can hold the "
+            f"longest row ({need} tokens); lengths={lengths.tolist()[:8]}"
+        )
+    if int(hidden.size(1)) != n_ctx:
+        raise RuntimeError(
+            f"hidden batch {int(hidden.size(1))} != len(lengths)={n_ctx} "
+            f"(hidden_states={tuple(hidden_states.shape)}, need={need})"
         )
 
     width = hidden.size(0)
@@ -210,7 +239,7 @@ def _score_processor(*, context, hidden_states, output_layer, **kwargs):
         context["metrics"] = {
             "loss": float(loss.detach()),
             "accuracy": float((predicted == labels.float()).float().mean()),
-            "rows": rows,
+            "rows": int(scores.numel()),
         }
     return loss
 
