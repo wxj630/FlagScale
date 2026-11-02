@@ -216,6 +216,13 @@ export XPU_ENABLE_PROFILER_TRACING=1 XPU_CUPTI_ENABLE_DEVICE=0
 已从修复后的 epoch-2（配对准确率最高）续训 1 epoch，lr 2e-6：
 `examples/retrieval/train-reranker-resume.sh`，输出 `reranker-resume-ep3`。
 
+> **顺带发现的调度缺陷**：配置注释写"schedule 不是可选的"，但对**单 epoch**
+> run 不成立。流式数据集在第一个 epoch 内长度未知，`build_lr_scheduler` 的
+> `factor()` 在 `state["known"]` 为假时返回 1.0（刻意如此，避免按猜测衰减），
+> 而 re-anchor 发生在**第一个 epoch 结束后**。所以 1-epoch 训练全程 lr 恒定，
+> cosine 衰减从不生效。实测本次续训 step 470 时 lr 仍是 2.000e-06。
+> 要对单 epoch 生效必须显式传 `train.lr_decay_steps`。
+
 > 监控注意：FlagScale 会把训练日志重定向到
 > `logs/exp-<name>/logs/details/.../stdout.log`，外层的
 > `logs/train-*.log` 只有启动信息。只看外层会误判成"卡住"。
