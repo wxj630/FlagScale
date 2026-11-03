@@ -138,6 +138,52 @@ STAGES = [
 CALIBERS = ("full", "public", "mean")
 PHASES = ("pretrain", "sft")
 
+# Per-dataset breakdown for calibers A and B. Sizes come from the papers:
+# M3-Embedding Table 1 (appendix) for BGE-M3, section 5 for CLIP, and the Qwen3
+# report for the reranker. ``full`` / ``public`` are separate sizes because they
+# genuinely differ (WIT has no public equivalent; the reranker's named sets are
+# only partly public). Caliber C is deliberately absent: it is the public total
+# divided by the dataset count, so listing datasets would restate that division.
+DATASETS = [
+    # model, phase, dataset, unit, size_full, size_public, note
+    ("BGE-M3", "pretrain", "Pile + Wudao + mC4（RetroMAE）", "texts",
+     184e6, 184e6, "论文只给合计 184M / 105 语言，无逐源拆分"),
+    ("BGE-M3", "pretrain", "MTP", "pairs", 291.1e6, 0, "BGE 内部数据，未公开"),
+    ("BGE-M3", "pretrain", "S2ORC", "pairs", 41.8e6, 41.8e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "Wikipedia", "pairs", 6.5e6, 6.5e6, "48.3M 减 S2ORC 41.8M"),
+    ("BGE-M3", "pretrain", "xP3", "pairs", 62.6e6, 62.6e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "mC4", "pairs", 16.4e6, 16.4e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "CC-News", "pairs", 409.4e6, 409.4e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "NLLB", "pairs", 197.8e6, 197.8e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "CCMatrix", "pairs", 193.5e6, 193.5e6, "源码注释里的逐项值"),
+    ("BGE-M3", "pretrain", "CodeSearchNet", "pairs", 0.3441e6, 0.3441e6, "文本-代码"),
+    ("BGE-M3", "sft", "EN 8 集", "rows", 1.1e6, 1.1e6,
+     "HotpotQA/TriviaQA/NQ/MS MARCO/COLIEE/PubMedQA/SQuAD/SimCSE-NLI"),
+    ("BGE-M3", "sft", "ZH 7 集", "rows", 386.6e3, 386.6e3,
+     "DuReader/mMARCO-ZH/T²-Ranking/LawGPT/CMedQAv2/NLI-zh/LeCaRDv2"),
+    ("BGE-M3", "sft", "多语 2 集", "rows", 88.9e3, 88.9e3, "Mr.TyDi / MIRACL"),
+    ("BGE-M3", "sft", "MultiLongDoc（合成）", "rows", 41.4e3, 0, "仅公布 prompt"),
+    ("CLIP ViT-L/14", "pretrain", "WIT", "pairs", 400e6, 0, "自建爬取，未公开"),
+    ("CLIP ViT-L/14", "pretrain", "YFCC100M 过滤后", "pairs", 0, 15e6,
+     "替代方案：原始 100M，过滤后约 15M"),
+    ("CLIP ViT-L/14", "sft", "MSCOCO Captions 2017 train", "pairs", 0, 106240,
+     "论文无此阶段，我们自加"),
+    ("Qwen3-Rerank-8B", "sft", "标注 12 个点名集 + .etc", "pairs",
+     7e6, 2.8e6, "论文只给 7M 总数；公开部分按 40% 假设，见 9.2"),
+    ("Qwen3-Rerank-8B", "sft", "高质量合成（cos>0.7 筛出）", "pairs",
+     12e6, 0, "未发布"),
+]
+
+# How many encoder passes one unit costs. BGE-M3 is a bi-encoder, so a pair is
+# two encodes and an SFT row is 1 query + 1 pos + 7 neg = 9 encodes. CLIP scores
+# pairs jointly and the reranker is a cross-encoder, so one pair = one pass --
+# the rates for those two are already per pair, not per text.
+UNIT_MULTIPLIER = {
+    "BGE-M3": {"texts": 1, "pairs": 2, "rows": 9},
+    "CLIP ViT-L/14": {"pairs": 1},
+    "Qwen3-Rerank-8B": {"pairs": 1},
+}
+
 
 def gpu_hours(units: float, rate_per_s: float) -> float:
     return units / (rate_per_s * 3600.0)
@@ -147,6 +193,47 @@ def fmt(x: float) -> str:
     if x >= 1:
         return f"{x:,.0f}"
     return f"{x:.1f}" if x > 0 else "0"
+
+
+def stage_rate(model: str, phase: str, dataset: str) -> str:
+    """Sequence length decides the rate: RetroMAE runs at 8192, the rest at 512."""
+    if "RetroMAE" in dataset:
+        return "bge_8192"
+    if "Rerank" in model:
+        return "reranker_640"
+    if "CLIP" in model:
+        return "clip_77"
+    return "bge_512"
+
+
+def dataset_tables(gpus: int) -> None:
+    """Per-dataset sizes and cost, for calibers A and B separately.
+
+    Caliber C is omitted on purpose: it is the public total divided by the
+    number of datasets, so a per-dataset list would just restate that division.
+    """
+    for caliber, field, title in (
+        ("full", 3, "A 论文全量"),
+        ("public", 4, "B 公开可得"),
+    ):
+        print(f"### 口径 {title}：逐数据集\n")
+        print("| 模型 | 阶段 | 数据集 | 数据量 | 单 epoch GPU-h | 备注 |")
+        print("|---|---|---|---|---|---|")
+        subtotal = 0.0
+        for model, phase, name, unit, *rest in DATASETS:
+            size = rest[field - 3]
+            note = rest[-1]
+            if size <= 0:
+                continue
+            multiplier = UNIT_MULTIPLIER[model][unit]
+            hours = gpu_hours(size * multiplier, THROUGHPUT[stage_rate(model, phase, name)])
+            subtotal += hours
+            unit_cn = {"texts": "条文本", "pairs": "对", "rows": "行"}[unit]
+            shown = f"{size / 1e6:,.1f}M {unit_cn}"
+            if unit == "rows":
+                shown += " × 9 texts"
+            print(f"| {model} | {phase} | {name} | {shown} | {hours:,.1f} | {note} |")
+        print(f"\n**小计 {subtotal:,.0f} GPU-h = {subtotal / gpus / 24:.1f} 天**\n")
 
 
 def paper_epoch_tables(gpus: int) -> None:
@@ -218,12 +305,20 @@ def main() -> None:
     ap.add_argument("--markdown", action="store_true", help="emit markdown tables")
     ap.add_argument("--gpus", type=int, default=8, help="GPUs per server")
     ap.add_argument(
+        "--datasets",
+        action="store_true",
+        help="per-dataset sizes for calibers A and B",
+    )
+    ap.add_argument(
         "--paper-epochs",
         action="store_true",
         help="cost each stage at the epoch count the paper declares, not 1",
     )
     args = ap.parse_args()
 
+    if args.datasets:
+        dataset_tables(args.gpus)
+        return
     if args.paper_epochs:
         paper_epoch_tables(args.gpus)
         return
