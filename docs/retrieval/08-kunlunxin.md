@@ -266,31 +266,43 @@ refer to a function template ... 1 error generated when compiling for xpu3.
 | `attention_backend=flash` 代替 `unfused` | ⚠️ **前向通过，反向仍崩** |
 | 关闭 gradient checkpointing | ❌ 仍崩 |
 
-### 已测出精确阈值：只在 seq ≥ 288 的反向里崩
+### 精确阈值：seq ≥ 288 的反向会崩，**但可以绕过**
 
-| seq | 前向 | 前向+反向 |
+现象：同一形状**前向能过，`loss.backward()` 就崩**。
+
+| seq | 前向 | 前向+反向（默认） | 前向+反向（`XMLIR_BMM_DISPATCH_VALUE=0`） |
+|---|---|---|---|
+| 128 / 192 / **256** | ✅ | ✅ | ✅ |
+| **288 以上（320/512/640）** | ✅ | ❌ `bmm_one_loop` | ✅ **通过** |
+
+**这跟显存无关**：崩的时候只用了 75 / 96 GiB。原因是厂商 XBLAS 的 JIT
+在 seq ≥ 288 时实例化 `bmm_one_loop` 模板失败
+（`bmm::algo2::` 与 `::bmm::algo2::` 命名空间不匹配）。
+
+#### 解法：`export XMLIR_BMM_DISPATCH_VALUE=0`
+
+实测这个变量是**选择 bmm 用哪个算法实现**：
+
+| 取值 | 实际 kernel | 结果 |
 |---|---|---|
-| 128 | ✅ | ✅ |
-| 192 | ✅ | ✅ |
-| **256** | ✅ | ✅ |
-| 288 | — | ❌ `bmm_one_loop` |
-| 320 / 512 / 640 | ✅ | ❌ |
+| 未设 / `2` | `bmm_km_nmk` (`bmm::**algo2**`) | ❌ seq≥288 崩 |
+| **`0` / `3` / `4` / `5`** | `bmm_bf16_rn_one_loop` (`bmm::**algo4**`) | ✅ 正常 |
+| `1` | — | ❌ 直接失败 |
 
-**触发点是反向**：同一形状的前向可以过，`loss.backward()` 就崩。原因是 unfused
-attention 反向要对 `[b*np, seq, seq]` 做 `baddbmm`，XBLAS 在 `seq ≥ 288` 时
-实例化 `bmm_one_loop` 模板失败（`bmm::algo2::` 与 `::bmm::algo2::` 命名空间
-不匹配）。flash 后端的前向绕开了它，反向没有。
+**而且不会变慢，反而更快**（单算子，seq=640）：
 
-**这条对训练的直接影响**：`max_length` 必须 ≤ 256 才能在昆仑芯上训练。
-T²-Ranking 的 p99 是 471、max 541，所以 **seq=256 会截断一部分样本**。
-本轮的昆仑芯 reranker 用 `max_length=256` 跑，**这一点必须记录**，
-与 A100 的 640 不同口径。
+| | 未设 | `=0` |
+|---|---|---|
+| `bmm` | 0.179 ms | **0.091 ms**（快 2×） |
+| `baddbmm` | 0.092 ms | 0.092 ms（持平） |
 
-**给厂商的原因很明确**：XBLAS 的 `bmm` JIT 在 seq≥288 时模板实例化失败，
-与是否 pipeline 并行无关（单进程反向同样复现）。
+所以这个开关**没有任何代价**，已写进 `examples/retrieval/run-kunlunxin.sh`
+的 reranker 分支。**昆仑芯不需要降 seq**，可以和 A100 一样用 `max_length=640`。
 
-> 上一次（10-29）的 run 也停在同一个位置——`megatron plan` 之后就没有了，
-> 日志只有 18 行。当时误以为是别的原因，实际是同一个阻塞点。
+> 一个教训：这个 bug 我在 `kunlunxin-bmm-jit-bug` 里早就记过（阈值写的是 320，
+> 实际是 288），但排查时没先去查记录，绕了一大圈才发现厂商库里有现成开关。
+> 遇到"厂商算子 JIT 崩"这类问题，**先查历史记录再动手试**。
+
 
 ## 五、缺什么
 

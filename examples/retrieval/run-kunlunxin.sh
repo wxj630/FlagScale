@@ -90,6 +90,16 @@ if [ "$model" = "qwen3_reranker" ]; then
     exit 1
   fi
   export PYTHONPATH="$MEGATRON_HOME:$ROOT:${PYTHONPATH:-}"
+  # The vendor XBLAS JIT cannot compile its bmm template once seq >= 288:
+  #   explicit instantiation of 'bmm_one_loop' does not refer to a function
+  #   template (bmm::algo2:: vs ::bmm::algo2::)
+  # It only shows up in the BACKWARD (forward passes at any length), and it is
+  # not a memory limit -- seen at 75/96 GiB.  0 selects a different bmm kernel
+  # (bmm::algo4 / bmm_bf16_rn_one_loop) that compiles fine, and it is also
+  # ~2x faster for bmm at seq 640 (0.091 ms vs 0.179 ms).
+  # Without this the reranker can only train at max_length<=256, which truncates
+  # T2Ranking (p99 471, max 541) and makes the numbers incomparable to A100.
+  export XMLIR_BMM_DISPATCH_VALUE=0
 fi
 
 $PY -m flagscale.run \
