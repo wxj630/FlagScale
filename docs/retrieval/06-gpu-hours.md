@@ -503,3 +503,90 @@ WIT 未公开，但论文**自己做过替代实验**（数据集消融）：
 |---|---|
 | **Qwen3-Embedding-0.6B** | 按你的要求只保留三个模型。它与 BGE-M3 同量级，若要纳入可复用 118 texts/s：预训练（150M 合成，公开口径 0）+ SFT（公开 2.8M）= 约 +13 GPU-h，不影响任何结论。 |
 | **Qwen3-VL-Embedding-8B** | 论文只写"公开、内部专有及合成的文本/图像/视频/视觉文档混合语料"，**没给规模**；我们也没有实测吞吐。要纳入必须先拿到论文的数据规模表。 |
+
+---
+
+## 十、三篇论文自己报告的训练时间
+
+**先说结论：只有 CLIP 报了墙钟时间，另外两篇一个字都没提。**
+
+| 模型 | 论文 | 报告的训练时长 | 报告的硬件 | 报告的训练量 | 能否直接算 GPU-h |
+|---|---|---|---|---|---|
+| **BGE-M3**（M3-Embedding） | ACL Findings 2024 | ❌ **未报告** | 预训练 A：32 × A100(40GB)<br>预训练 B：96 × A800(80GB)<br>微调：24 × A800(80GB) | 20,000 步 / 25,000 步<br>微调只给 ~6,000 步 warmup | ❌ 有卡数有步数，**没有每步耗时** |
+| **CLIP ViT-L/14** | ICML 2021 | ✅ **12 天** | **256 × V100** | 32 epoch × 400M pairs | ✅ **73,728 V100 GPU-h** |
+| **Qwen3-Reranker-8B** | Qwen3-Emb. 报告 2025 | ❌ **未报告** | ❌ **未报告任何 GPU** | 只给 ~19M pairs，无步数、无 epoch 数 | ❌ 无任何训练时间信息 |
+
+**原文出处**（便于复核）：
+
+- CLIP §2.2：*"The largest ResNet model, RN50x64, took **18 days** to train on
+  **592 V100 GPUs** while the largest Vision Transformer took **12 days** on
+  **256 V100 GPUs**."* 同一段还写了 *"We train all models for 32 epochs."*
+- BGE-M3 附录 Implementation Details：*"Pre-training is conducted on **32
+  A100(40GB) GPUs for 20,000 steps**"*、*"The second stage is conducted on
+  **96 A800(80GB) GPUs**... This training process takes **25,000 steps**"*、
+  微调 *"carried out on **24 A800(80GB) GPUs**"*、*"approximately **6000 steps**
+  to perform warm-up ... Subsequently, we conducted unified training"*。
+  **全文没有 hours / days 这类词。**
+- Qwen3-Embedding 报告（`contents/train.tex` + `evaluation.tex` + `intro.tex` +
+  `model_arc.tex`）：grep `GPU|A100|H800|hours|days|node` **零命中**。
+
+### 10.1 CLIP 是唯一能与我们的实测互相验证的
+
+| 项 | 值 |
+|---|---|
+| 论文：256 V100 × 12 天 | **73,728 V100 GPU-h** |
+| 每 epoch（32 epoch 均摊） | 2,304 V100-h = 256 卡上 **9.0 小时** |
+| 换成 A100（V100→A100 bf16 ≈ 2.47×，见 §二） | **29,850 A100 GPU-h** |
+| 单机 8 卡 | **155.5 天** |
+| 单 epoch | **933 A100 GPU-h** |
+
+> **与 §九 的 934 A100-h/epoch 相差 0.1%。** §九 那个数是用我们实测的
+> 119 pairs/s 独立算出来的，与论文报告的 256×V100×12 天完全对得上。
+> **这是三篇论文里唯一一处"论文墙钟时间"和"我们的实测吞吐外推"能相互印证的模型**，
+> 也是 §二 说外推方法可信的依据。
+
+另外论文还报了 RN50x64（不在我们三个模型内）：592 V100 × 18 天 =
+**255,744 V100-h**，是 ViT-L/14 的 3.5 倍。
+
+> ViT-L/14@336px 在 32 epoch 之外**再加 1 个 epoch**（更高分辨率），
+> 论文没单独报这一步的时间。
+
+### 10.2 BGE-M3 为什么算不出训练时间
+
+论文给了三步的**卡数**和**步数**，唯独没给**每步耗时**。而步时又不能凭空补：
+
+- 论文写 *"batch size is set to 32 and we accumulate the gradient over 16 steps"*
+  配 32 卡。按字面（每卡 micro-batch 32 × GA 16 × 32 卡）每步是 16,384 个样本；
+  按"每步总共 512 个"读则小 32 倍。**原文没有明确到能唯一确定**，而两种读法
+  相差 32 倍，直接决定 GPU-h 是 400 还是 12,300。
+- 这就是 §四 里 RetroMAE 那条 **771 GPU-h 被标 ±2×** 的根源：它建立在
+  "8192 长度吞吐按长度线性外推"之上，而步时本身还要再叠一层 batch 口径的歧义。
+
+**结论**：BGE-M3 的训练时间，论文没报，我们只能给区间，且区间宽到不能当结论用。
+
+### 10.3 Qwen3-Reranker 完全没有训练时间信息
+
+这篇报告（Qwen3 Embedding 技术报告 2025）在训练侧只公开了：**数据量**
+（~7M 标注 + ~12M 合成）、**损失函数**（`-log p(l|P(q,d))`，l ∈ {yes,no}）、
+**两阶段流程**（reranker 跳过弱监督预训练）与 **model merging**。
+
+它**没有**公开：GPU 型号、卡数、训练步数、epoch 数、批大小、训练时长——
+任何一项都没有。所以：
+
+> §九 表里 reranker 的 **1,916 GPU-h（全量）/ 282 GPU-h（公开）**
+> 是我们用**实测吞吐 × 数据量**自行外推的，**不是论文数据**，
+> 也不可能用论文数据去校验。
+
+对比 CLIP 有 0.1% 的吻合，reranker 这个数的不确定性完全来自"数据量 19M 本身
+也是估的"（论文只给总数，含 `.etc` 未点名部分，见 §八）。
+
+### 10.4 一句话
+
+| 模型 | 论文报了吗 | 我们的数从哪来 | 可信度 |
+|---|---|---|---|
+| BGE-M3 | ❌ 只有卡数+步数 | 实测吞吐 × 数据量，步时靠外推 | 低（±2×） |
+| CLIP | ✅ **12 天 / 256 V100** | 论文时间 ÷ epoch，与实测吻合 0.1% | **高** |
+| Reranker-8B | ❌ 什么都没有 | 实测吞吐 × 估算数据量 | 中（数据量估的） |
+
+**如果报告里只能引一个"论文报告的训练时间"，那只有 CLIP 那一个数字是论文说的。**
+其余两个必须写成"按论文公布的数据量、用我们的实测吞吐折算"。
