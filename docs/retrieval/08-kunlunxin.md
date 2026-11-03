@@ -262,10 +262,32 @@ refer to a function template ... 1 error generated when compiling for xpu3.
 |---|---|
 | 换卡（0,1 → 2,3） | ❌ 同样报错，不是特定卡 |
 | 清空 JIT 缓存重跑 | ❌ 稳定重现，不是缓存竞争 |
-| 单进程跑相同形状的 `bmm` / `matmul` | ✅ **全部通过**（64×640×4096 @ 4096×2 等） |
+| 单进程跑相同形状的 `bmm` / `matmul` | ✅ 通过（但见下，前向能过不代表反向能过） |
+| `attention_backend=flash` 代替 `unfused` | ⚠️ **前向通过，反向仍崩** |
+| 关闭 gradient checkpointing | ❌ 仍崩 |
 
-所以这是**双进程 pipeline 下才触发**的编译路径问题，需要厂商确认，
-或用不同形状绕开（待试）。
+### 已测出精确阈值：只在 seq ≥ 288 的反向里崩
+
+| seq | 前向 | 前向+反向 |
+|---|---|---|
+| 128 | ✅ | ✅ |
+| 192 | ✅ | ✅ |
+| **256** | ✅ | ✅ |
+| 288 | — | ❌ `bmm_one_loop` |
+| 320 / 512 / 640 | ✅ | ❌ |
+
+**触发点是反向**：同一形状的前向可以过，`loss.backward()` 就崩。原因是 unfused
+attention 反向要对 `[b*np, seq, seq]` 做 `baddbmm`，XBLAS 在 `seq ≥ 288` 时
+实例化 `bmm_one_loop` 模板失败（`bmm::algo2::` 与 `::bmm::algo2::` 命名空间
+不匹配）。flash 后端的前向绕开了它，反向没有。
+
+**这条对训练的直接影响**：`max_length` 必须 ≤ 256 才能在昆仑芯上训练。
+T²-Ranking 的 p99 是 471、max 541，所以 **seq=256 会截断一部分样本**。
+本轮的昆仑芯 reranker 用 `max_length=256` 跑，**这一点必须记录**，
+与 A100 的 640 不同口径。
+
+**给厂商的原因很明确**：XBLAS 的 `bmm` JIT 在 seq≥288 时模板实例化失败，
+与是否 pipeline 并行无关（单进程反向同样复现）。
 
 > 上一次（10-29）的 run 也停在同一个位置——`megatron plan` 之后就没有了，
 > 日志只有 18 行。当时误以为是别的原因，实际是同一个阻塞点。
