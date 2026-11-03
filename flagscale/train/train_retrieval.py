@@ -770,9 +770,14 @@ def _train_megatron(
     split_modulo = int(data_cfg.get("split_modulo", 20))
     num_negatives = int(data_cfg.get("num_negatives", 1))
     max_length = int(model_cfg.get("max_length", 640))
+    # Qwen3 vocabulary: "yes"=9693, "no"=2152.  The default for `no` used to be
+    # 9692, which decodes to 'icken' -- a completely unrelated token.  Scoring
+    # logit[yes] - logit['icken'] still produced a finite loss, so nothing
+    # raised: it just made the model unlearnable (BCE stuck at 5.7 and NaN),
+    # because the two logits it compared carried no relevance signal.
     score_ids = (
         int(model_cfg.get("true_token_id", 9693)),
-        int(model_cfg.get("false_token_id", 9692)),
+        int(model_cfg.get("false_token_id", 2152)),
     )
 
     batch_rows = int(train_cfg.get("batch_size", 1))
@@ -832,12 +837,19 @@ def _train_megatron(
 
     # The loaders are the same builders DDP/FSDP2 use, so the split rule can
     # only ever be the one FlagScale implements.
+    # Seed by DATA-PARALLEL rank, not the global rank.  With pipeline
+    # parallelism every stage must consume the identical batch -- stage1 scores
+    # the activations stage0 produced -- so they have to shuffle the same way.
+    # `seed + rank` gave each stage a different shuffle, so stage1 paired a
+    # hidden state with another sample's labels.  Combined with the dataset
+    # sharding fix in datasets/retrieval.py, this is what made p=2 score 9.78 on
+    # a prompt that HF scores at 1.25.
     train_loader, validation_loader, test_loader = build_split_loaders(
         task,
         data_cfg,
         batch_rows,
         pin_memory=bool(platform and platform.supports_pin_memory()),
-        seed=seed + rank,
+        seed=seed + int(getattr(trainer, "dp_rank", 0)),
     )
 
     # A step budget is required: the pipeline schedule pulls from an iterator,
@@ -957,8 +969,15 @@ def _train_megatron(
     finish_distributed()
 
 
-def save_megatron_stage(trainer: Any, target: Path) -> None:
+def save_megatron_stage(trainer: Any, target: Path, **_legacy: Any) -> None:
     """Write this rank's pipeline stage into ``target/stage{K}.pt``.
+
+    ``**_legacy`` absorbs the ``tensorboard=`` argument the three call sites
+    still pass.  It is not used: the Megatron path never wrote tensorboard
+    events, and dropping the keyword from the signature instead broke every
+    epoch save with "unexpected keyword argument 'tensorboard'" -- which took
+    out the final checkpoint and also turned that epoch's reported train_loss
+    into nan, because the exception escaped before the stats were returned.
 
     Collective: every rank calls it, because flushing the fp32 master into the
     bf16 parameters touches that rank's optimizer shards.
@@ -976,10 +995,10 @@ def save_megatron_stage(trainer: Any, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=True)
     destination = target / f"stage{trainer.pp_rank}.pt"
     torch.save(state, destination)
-    log(
-        f"saved {destination} ({len(state)} tensors, "
-        f"max|w|={max(t.abs().max().item() for t in state.values()):.3f})"
-    )
+    # max() over an empty generator raises, and on the last rank every entry but
+    # the final norm can be lazy/None, leaving state empty.
+    peak = max((float(t.abs().max()) for t in state.values()), default=float("nan"))
+    log(f"saved {destination} ({len(state)} tensors, max|w|={peak:.3f})")
     if trainer.world_size > 1:
         torch.distributed.barrier()
 

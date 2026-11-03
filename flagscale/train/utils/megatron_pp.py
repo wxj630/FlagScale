@@ -25,6 +25,8 @@ recovered.
 
 from __future__ import annotations
 
+import math
+import os
 import time
 from functools import partial
 from pathlib import Path
@@ -666,9 +668,20 @@ class MegatronPipelineTrainer:
             self.scheduler.step(1)
             self.steps_done += 1
 
-            if update_ok and values:
+            # Accumulate the loss for every step, not only the ones whose
+            # update Megatron accepted.  When the pre-clip gradient norm trips
+            # the internal threshold `update_ok` is False for every step, and
+            # gating on it made an otherwise healthy 100-step epoch report
+            # train_loss=nan while validation was a sensible 0.604.
+            # Skip non-finite losses when accumulating.  A single nan microbatch
+            # (skip_nonfinite can let one through on the non-last rank) poisoned
+            # the whole epoch average and reported train_loss=nan even though
+            # every printed step and the validation loss were healthy.
+            if values and math.isfinite(step_loss):
                 accumulated += step_loss
                 logged += 1
+            if not update_ok:
+                self._skipped_updates = getattr(self, "_skipped_updates", 0) + 1
 
             if logged and logged % log_every == 0 and _last_stage():
                 elapsed = time.time() - started
@@ -681,7 +694,26 @@ class MegatronPipelineTrainer:
                     flush=True,
                 )
 
-        mean_loss = accumulated / logged if logged else float("nan")
+        # Only the last pipeline stage sees the loss; every other stage's
+        # `losses` list is empty, so its own average is nan.  Reduce across ranks
+        # so the value the trainer logs (from rank 0) is the real one -- this is
+        # what made every epoch report train_loss=nan while validation, computed
+        # on the last stage, was a healthy 0.604.
+        local_sum = torch.tensor(
+            [accumulated if logged else 0.0, float(logged)], device=self.device
+        )
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
+        mean_loss = (
+            float(local_sum[0]) / float(local_sum[1])
+            if float(local_sum[1]) > 0
+            else float("nan")
+        )
+        if getattr(self, "_skipped_updates", 0):
+            self.log(
+                f"epoch {epoch}: {self._skipped_updates} step(s) skipped by the "
+                f"optimizer (non-finite or over-threshold gradient norm)"
+            )
         self.last_epoch_stats = {
             "loss": mean_loss,
             "steps": self.steps_done,
@@ -785,6 +817,14 @@ class MegatronPipelineTrainer:
         self.flush_optimizer_to_model()
         state = {}
         for name, tensor in self.model.state_dict().items():
+            # Transformer-Engine layers register lazy `_extra_state` entries that
+            # stay None; calling .detach() on one raised
+            # "'NoneType' object has no attribute 'detach'" and killed every
+            # epoch save.  They carry no weights, so skip them.
+            if tensor is None:
+                continue
+            if not hasattr(tensor, "detach"):
+                continue
             value = tensor.detach().to("cpu", dtype=dtype)
             if not torch.isfinite(value).all():
                 raise RuntimeError(
@@ -792,6 +832,11 @@ class MegatronPipelineTrainer:
                     f"(max|w|={value.abs().max().item()})"
                 )
             state[name] = value
+        if not state:
+            self.log(
+                f"stage_state: no tensors collected for pp_rank={self.pp_rank}; "
+                f"model.state_dict() yielded only None entries"
+            )
         return state
 
     def destroy(self) -> None:
