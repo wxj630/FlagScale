@@ -85,8 +85,9 @@ STAGES = [
     ),
     Stage(
         "BGE-M3", "pretrain", "pretrain-B contrastive@512", "bge_512", "texts",
-        full=1.2e9 * 2, public=928.3e6 * 2, mean=928.3e6 / 4 * 2,
-        note="77% public (MTP 291.1M missing); mean divides by 4 public tables",
+        full=1.2e9 * 2, public=928.3e6 * 2, mean=928.3e6 / 8 * 2,
+        note="77% public (MTP 291.1M missing); mean divides by the 8 public "
+             "datasets in DATASETS, not the paper's 4 grouping rows",
         # 25,000 steps. Table 8's column header reads "Detailed total batch
         # size", so these are global batches, ranging 9,984 (7k-8k tokens) to
         # 67,200 (0-500 tokens). 25,000 steps therefore = 249.6M to 1.68B pairs.
