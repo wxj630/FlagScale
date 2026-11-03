@@ -120,6 +120,55 @@
 > 要对齐论文需要补 Flickr30k（原发布页 `shannon.cs.illinois.edu/DenotationGraph/`，
 > 1k test images，双向 R@1/5/10）。这是**评测侧**缺口，不影响训练。
 
+## 怎么读 Table 13（最容易误读成"CLIP 也做了微调"）
+
+论文表 13 的 caption 是 *"CLIP improves zero-shot retrieval and is competitive
+with the best fine-tuned result on Flickr30k text retrieval."*
+这句话里的 **"fine-tuned result" 指的是别人的微调结果，不是 CLIP 自己微调过。**
+
+表的行分成两个组，`\multirow{5}{*}{Finetune}` 和 `\multirow{5}{*}{Zero-Shot}`：
+
+| 行组 | 模型 | Flickr30k 文本检索 R@1 |
+|---|---|---|
+| **Finetune** | Unicoder-VL / Uniter / VILLA / Oscar / ERNIE-ViL | 86.2 / 87.3 / 87.9 / — / **88.7** |
+| **Zero-Shot** | Visual N-Grams / ImageBERT / Unicoder-VL / Uniter / **CLIP** | 15.4 / — / 64.3 / 83.6 / **88.0** |
+
+**CLIP 只出现在 Zero-Shot 组，表里没有 "CLIP fine-tuned" 这一行。**
+caption 的意思是：CLIP 零样本的 88.0 与 ERNIE-ViL **微调后**的 88.7 几乎持平
+（差 0.7 点）——这是论文最想强调的结论。
+
+### 陷阱：Unicoder-VL 和 Uniter 出现了两次
+
+这两个模型在 Finetune 组和 Zero-Shot 组**各出现一次**：
+Unicoder-VL 微调 86.2 / 零样本 64.3，Uniter 微调 87.3 / 零样本 83.6。
+扫表时容易把同一模型的两行看混，进而以为"这一片都是微调结果"。
+
+### 论文明确说过不做检索微调
+
+正文 §5（`clip_paper.tex` 第 1234 行）：
+
+> *"In Table 13 we check the **zero-shot** transfer performance of CLIP for both
+> text and image retrieval... On the larger MS-COCO dataset fine-tuning improves
+> performance significantly and **zero-shot CLIP is not competitive** with the
+> most recent work."*
+
+这里 "fine-tuning improves performance" 说的也是**别的模型**微调之后更好：
+MSCOCO 上 Oscar 微调 73.5 vs CLIP 零样本 58.4。
+
+### CLIP 自己唯一的"微调"是什么
+
+**ViT-L/14@336px**：在 448→336 更高分辨率上、**在 WIT 上**多训 1 个 epoch。
+不是 COCO/Flickr，也不是下游任务微调。
+
+> 论文还专门解释过为什么选线性探针而不是端到端微调（第 458 行）：
+> *"Fine-tuning, because it adapts representations to each dataset during the
+> fine-tuning phase, can compensate for and potentially mask failures to learn
+> general and robust representations."*
+
+**结论**：论文训练侧只有 **WIT 预训练**一步；COCO 与 Flickr30k 在论文里
+**都只是零样本评测集**。我们在 COCO **train** 上的微调是论文里不存在的阶段
+（见 `06-gpu-hours.md` §12.1）。
+
 ## 一个容易漏的细节
 
 > 论文原文：*"For both these datasets we prepend the prompt `a photo of` to the

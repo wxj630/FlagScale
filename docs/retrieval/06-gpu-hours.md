@@ -787,7 +787,15 @@ WIT 预训练 + 零样本评测。所以：
 > | **Flickr30k（1k test）** | 零样本评测集 | **仅评测**，且机器上还没下载 |
 >
 > 两个都**不是**训练集。论文的做法是"WIT 预训练 → 在 COCO/Flickr 上零样本测试"；
-> 我们的做法是"官方权重 → COCO train 微调 → COCO 5k 测试"。Flickr30k 若要
+> 我们的做法是"官方权重 → COCO train 微调 → COCO 5k 测试"。
+>
+> ⚠️ 论文表 13（Table 13）的标题 *"competitive with the best **fine-tuned**
+> result"* 容易被读成"CLIP 也在 COCO/Flickr 上微调过"。**不是**：那张表分
+> `Finetune` 与 `Zero-Shot` 两个行组，CLIP 只在 Zero-Shot 组（Flickr30k 文本
+> 检索 R@1 = 88.0），"fine-tuned result" 指的是 ERNIE-ViL 的 88.7。
+> 逐个模型的拆解见 [`04-clip.md`](04-clip.md) 的"怎么读 Table 13"。
+>
+> Flickr30k 若要
 > 纳入训练，得先下载（原发布页 `shannon.cs.illinois.edu/DenotationGraph/`），
 > 而且它与 COCO 高度同质，增量意义有限。
 >
