@@ -89,15 +89,33 @@ def _distributed_context() -> tuple[int, int]:
 
 
 def _shard_context() -> tuple[int, int]:
-    """Combine torchrun rank and DataLoader worker id into one shard.
+    """Combine the data-parallel rank and DataLoader worker id into one shard.
 
     An ``IterableDataset`` is materialized independently in every worker, so
     without worker-aware sharding each of the ``num_workers`` processes would
     yield the full stream and duplicate samples.  Pairing rank with worker id
     gives every (rank, worker) a distinct slice of the split.
+
+    The rank used here must be the *data-parallel* rank, not the global
+    torchrun rank.  With pipeline parallelism every stage of the same pipeline
+    has to consume the same samples -- stage1 scores the activations stage0
+    produced.  Sharding by global rank gave the two stages disjoint data, so
+    stage1 paired a hidden state with another sample's labels: measured on
+    P800, the same prompt scored 4.55 through p=2 versus 1.25 through HF, while
+    the identical weights in a single stage scored 1.31 (correct).  Falls back
+    to the global rank when Megatron's parallel state is not initialised.
     """
 
     rank, world_size = _distributed_context()
+    try:
+        from megatron.core import parallel_state as _ps
+
+        if _ps.model_parallel_is_initialized():
+            # dp rank repeats across pipeline stages; dp size is what shards.
+            rank = _ps.get_data_parallel_rank()
+            world_size = _ps.get_data_parallel_world_size()
+    except Exception:
+        pass
     info = get_worker_info()
     if info is None:
         return rank, world_size
