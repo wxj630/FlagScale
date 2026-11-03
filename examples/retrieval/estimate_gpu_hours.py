@@ -58,7 +58,10 @@ class Stage:
     # Some stages are pinned by an absolute sample count rather than by epochs:
     # BGE-M3's appendix gives 20,000 / 25,000 steps, which fixes the total work
     # no matter how much data you actually hold. Expressed in `unit` terms.
+    # ``_lo`` / ``_hi`` carry the range the paper leaves open.
     paper_absolute: float | None = None
+    paper_absolute_lo: float | None = None
+    paper_absolute_hi: float | None = None
     # True when paper_epochs is our assumption, not the paper's statement.
     assumed: bool = False
 
@@ -70,20 +73,28 @@ STAGES = [
         "BGE-M3", "pretrain", "pretrain-A RetroMAE@8192", "bge_8192", "texts",
         full=184e6, public=184e6, mean=184e6 / 3,
         note="Pile/Wudao/mC4, all public -> A == B; mean divides by 3 sources",
-        # 20,000 steps x (32 per-GPU x GA 16 x 32 GPUs) = 327.68M samples
-        # = 1.78 passes of the 184M set. Absolute, so caliber-independent.
-        paper_epochs=327.68e6 / 184e6,
-        paper_absolute=327.68e6,
+        # 20,000 steps. Whether "batch size 32" is per-GPU or the 32-GPU total
+        # changes the answer 32x, and the paper does not say. We use the global
+        # reading: 32 total x GA 16 = 512/step -> 10.24M samples -> 0.056 passes
+        # (80B tokens). The per-GPU reading implies 32 samples of 8192 tokens on
+        # one 40GB card, whose attention matrices alone are 68.7 GB, so it is
+        # physically excluded. See docs section 11.2.
+        paper_epochs=10.24e6 / 184e6,
+        paper_absolute=10.24e6,
+        paper_absolute_hi=327.68e6,
     ),
     Stage(
         "BGE-M3", "pretrain", "pretrain-B contrastive@512", "bge_512", "texts",
         full=1.2e9 * 2, public=928.3e6 * 2, mean=928.3e6 / 4 * 2,
         note="77% public (MTP 291.1M missing); mean divides by 4 public tables",
-        # 25,000 steps x 67,200 (paper's total batch for the 0-500 bucket)
-        # = 1.68B pairs = 1.40 passes of 1.2B. The "32 per GPU" reading gives
-        # 0.064 passes instead -- a 22x spread the paper does not resolve.
-        paper_epochs=1.68e9 / 1.2e9,
-        paper_absolute=1.68e9 * 2,
+        # 25,000 steps. Table 8's column header reads "Detailed total batch
+        # size", so these are global batches, ranging 9,984 (7k-8k tokens) to
+        # 67,200 (0-500 tokens). 25,000 steps therefore = 249.6M to 1.68B pairs.
+        # We use the nine-bucket mean (29,216/step) as the central estimate.
+        paper_epochs=0.609,
+        paper_absolute=29_216 * 25_000 * 2,
+        paper_absolute_hi=67_200 * 25_000 * 2,
+        paper_absolute_lo=9_984 * 25_000 * 2,
     ),
     Stage(
         "BGE-M3", "sft", "SFT@512", "bge_512", "texts",
@@ -181,8 +192,15 @@ def paper_epoch_tables(gpus: int) -> None:
                 units = getattr(st, c) * st.paper_epochs
             cost[c] = gpu_hours(units, THROUGHPUT[st.rate])
             totals[c] += cost[c]
-        cells = " | ".join(f"{fmt(cost[c])} / {cost[c] / gpus / 24:.1f} d" for c in CALIBERS)
-        print(f"| {st.model} | {st.stage} | {cells} |")
+        cells = []
+        for c in CALIBERS:
+            if st.paper_absolute is not None and st.paper_absolute_hi:
+                lo = gpu_hours(st.paper_absolute_lo or st.paper_absolute, THROUGHPUT[st.rate])
+                hi = gpu_hours(st.paper_absolute_hi, THROUGHPUT[st.rate])
+                cells.append(f"{lo:,.0f} ~ {hi:,.0f} / {lo / gpus / 24:.1f}-{hi / gpus / 24:.1f} d")
+            else:
+                cells.append(f"{fmt(cost[c])} / {cost[c] / gpus / 24:.1f} d")
+        print(f"| {st.model} | {st.stage} | " + " | ".join(cells) + " |")
 
     cells = " | ".join(
         f"**{totals[c]:,.0f} / {totals[c] / gpus / 24:.1f} d**" for c in CALIBERS
