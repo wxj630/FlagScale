@@ -800,7 +800,14 @@ def _train_megatron(
             f"batch_size({batch_rows}) must be divisible by "
             f"micro_batch_rows({micro_batch_rows})"
         )
-    num_microbatches = (batch_rows // micro_batch_rows) * grad_accum
+    # `batch_rows` is already the rows for ONE optimizer step -- the loader
+    # yields that many, and `gradient_accumulation_steps` is expressed by
+    # splitting that step into micro-batches, not by multiplying it.  The
+    # previous `* grad_accum` double-counted: batch_size=2 with accum=2 planned
+    # 4 micro-batches for a 2-row step, so the schedule divided it into
+    # 1-row pieces and the last stage ended up with half a batch worth of
+    # labels ("hidden batch 2 != len(lengths)=4").
+    num_microbatches = batch_rows // micro_batch_rows
     epochs = int(train_cfg.get("epochs", 3))
     log_every = int(train_cfg.get("log_every", 1))
     save_every_epoch = bool(train_cfg.get("save_every_epoch", True))
@@ -864,7 +871,10 @@ def _train_megatron(
         max_samples=data_cfg.get("max_samples"),
         log=log,
     )
-    rows_per_step = batch_rows * (1 + num_negatives)
+    # Compare ROWS with ROWS: train_rows_total counts dataset rows, so the per
+    # step figure must as well.  Multiplying by (1 + num_negatives) mixed rows
+    # with pairs and made the step budget too small by that factor.
+    rows_per_step = batch_rows
     steps_per_epoch = max(1, train_rows_total // rows_per_step)
     total_steps = steps_per_epoch * epochs
     log(

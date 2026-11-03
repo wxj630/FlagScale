@@ -300,6 +300,13 @@ class _RowStream(Iterator[list[list[str]]]):
                     )
                 self.buffer.extend(pair_list)
                 self.buffer_rows += 1
+                # Stop as soon as this micro-batch is full.  The loader hands
+                # over `batch_size` rows at once, but a micro-batch may want
+                # fewer; without this break the whole loader batch was buffered
+                # and the first micro-batch consumed two rows' worth of pairs
+                # ("hidden batch 2 != len(lengths)=4").
+                if self.buffer_rows >= want_rows:
+                    break
 
     def __iter__(self) -> "_RowStream":
         return self
