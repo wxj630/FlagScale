@@ -204,6 +204,25 @@ def stage_rate(model: str, phase: str, dataset: str) -> str:
     return "bge_512"
 
 
+# Caliber D: for each stage, the smallest single dataset that can still run it.
+# Sizes are one dataset, not a group -- where the paper only publishes a group
+# total, the group is divided by its member count and the note says so.
+MIN_DATASET = [
+    # model, phase, dataset, unit, size, multiplier-from-group, note
+    ("BGE-M3", "pretrain", "Pile / Wudao / mC4 之一（RetroMAE）", "texts",
+     184e6 / 3, "论文只给 184M 合计，按 3 源均分；这是全流程的时间下限"),
+    ("BGE-M3", "pretrain", "CodeSearchNet（对比阶段）", "pairs",
+     0.3441e6, "全表最小"),
+    ("BGE-M3", "sft", "Mr.TyDi 或 MIRACL 之一", "rows",
+     88.9e3 / 2, "88.9K 是两集合计，除以 2"),
+    ("CLIP ViT-L/14", "pretrain", "YFCC100M 过滤后", "pairs",
+     15e6, "唯一公开替代，无更小的选项"),
+    ("CLIP ViT-L/14", "sft", "MSCOCO Captions 2017 train", "pairs",
+     106240, "唯一选项"),
+    ("Qwen3-Rerank-8B", "sft", "12 点名集里最小的一个", "pairs",
+     2.8e6 / 12, "2.8M 是 12 集合计，除以 12"),
+]
+
 # How many passes over each dataset the paper's own schedule amounts to.
 # BGE's two pretraining stages are pinned by step counts, so their pass count is
 # derived rather than stated; the SFT and reranker schedules are not published at
@@ -236,6 +255,45 @@ def paper_passes(model: str, phase: str, dataset: str, caliber_pool: float) -> f
     if model == "BGE-M3" and phase == "pretrain" and "RetroMAE" not in dataset:
         return CONTRASTIVE_PAIRS_DRAWN / caliber_pool
     return PAPER_PASSES[(model, phase)]
+
+
+def minimum_tables(gpus: int) -> None:
+    """Caliber D: one smallest dataset per stage -- the shortest full pipeline.
+
+    Answers 'how little can I get away with and still exercise every stage'. The
+    contrastive stage has no paper-volume figure: its schedule draws 730.4M
+    pairs, and the smallest single dataset holds 0.34M, so honouring it would
+    mean over 2,000 passes over the same tiny file.
+    """
+    print("### 口径 D：每阶段只跑最小的那一个数据集\n")
+    print("| 模型 | 阶段 | 最小数据集 | 数据量 | 单遍 GPU-h | 最小单位耗时 | 备注 |")
+    print("|---|---|---|---|---|---|---|")
+    total = 0.0
+    for model, phase, name, unit, size, note in MIN_DATASET:
+        rate = stage_rate(model, phase, name)
+        hours = gpu_hours(size * UNIT_MULTIPLIER[model][unit], THROUGHPUT[rate])
+        total += hours
+        unit_cn = {"texts": "条文本", "pairs": "对", "rows": "行"}[unit]
+        shown = f"{size / 1e6:,.2f}M {unit_cn}"
+        wall = f"{hours / gpus * 60:.1f} 分钟" if hours < 1 else f"{hours / gpus:.1f} 机器时"
+        print(f"| {model} | {phase} | {name} | {shown} | {hours:,.2f} | {wall} | {note} |")
+    print(f"\n**合计 {total:,.0f} GPU-h = {total / gpus:.1f} 机器时 = "
+          f"{total / gpus / 24:.1f} 天**（单机 {gpus} 卡）\n")
+    print("按论文 epoch 数（仅列能成立的阶段）：\n")
+    print("| 模型 | 阶段 | 遍数 | GPU-h | 备注 |")
+    print("|---|---|---|---|---|")
+    ptotal = 0.0
+    for model, phase, name, unit, size, note in MIN_DATASET:
+        if model == "BGE-M3" and phase == "pretrain" and "RetroMAE" not in name:
+            print(f"| {model} | {phase} | — | — | 论文要采 730.4M 对，最小集只有 "
+                  f"{size / 1e6:.2f}M，需 2,123 遍，不成立 |")
+            continue
+        rate = stage_rate(model, phase, name)
+        passes = paper_passes(model, phase, name, size)
+        hours = gpu_hours(size * UNIT_MULTIPLIER[model][unit] * passes, THROUGHPUT[rate])
+        ptotal += hours
+        print(f"| {model} | {phase} | {passes:.2f}× | {hours:,.1f} | {note} |")
+    print(f"\n**合计 {ptotal:,.0f} GPU-h = {ptotal / gpus / 24:.1f} 天**\n")
 
 
 def dataset_tables(gpus: int) -> None:
@@ -353,6 +411,11 @@ def main() -> None:
     ap.add_argument("--markdown", action="store_true", help="emit markdown tables")
     ap.add_argument("--gpus", type=int, default=8, help="GPUs per server")
     ap.add_argument(
+        "--minimum",
+        action="store_true",
+        help="caliber D: one smallest dataset per stage",
+    )
+    ap.add_argument(
         "--datasets",
         action="store_true",
         help="per-dataset sizes for calibers A and B",
@@ -364,6 +427,9 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.minimum:
+        minimum_tables(args.gpus)
+        return
     if args.datasets:
         dataset_tables(args.gpus)
         return
