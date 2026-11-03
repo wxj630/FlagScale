@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 
-# texts/s or pairs/s on one A100. Measured end to end unless noted.
+# texts/s or pairs/s on ONE A100-SXM4-80GB. All measured end to end by us.
 THROUGHPUT = {
     # 07-a100.md: 23,010 steps / 39,017.5 s, 200 texts per step.
     "bge_512": 118.0,
@@ -31,9 +31,6 @@ THROUGHPUT = {
     # attention is O(L^2), so the true value can be 2x lower. Biggest uncertainty
     # in the whole estimate; unblock by running ~100 RetroMAE steps at 8192.
     "bge_8192": 7.4,
-    # ASSUMED equal to bge_512: same ~0.6B dual encoder and sequence length.
-    # Not measured. If the paper trained at 32k the real number is far lower.
-    "qwen3_emb_512": 118.0,
     # 07-a100.md: 5.51 pairs/s across 2 cards, so 2.755 per card.
     "reranker_640": 5.51 / 2,
     # 07-a100.md: 318,720 samples / 2,679.1 s.
@@ -44,6 +41,7 @@ THROUGHPUT = {
 @dataclass(frozen=True)
 class Stage:
     model: str
+    phase: str  # "pretrain" or "sft"
     stage: str
     rate: str
     unit: str
@@ -56,50 +54,47 @@ class Stage:
 
 
 # Divisors are spelled out in the note so the mean caliber can be re-checked.
+# Covers exactly the three models in scope: BGE-M3, CLIP, Qwen3-Reranker.
 STAGES = [
     Stage(
-        "BGE-M3", "pretrain-A RetroMAE@8192", "bge_8192", "texts",
+        "BGE-M3", "pretrain", "pretrain-A RetroMAE@8192", "bge_8192", "texts",
         full=184e6, public=184e6, mean=184e6 / 3,
-        note="Pile/Wudao/mC4, all public -> A == B",
+        note="Pile/Wudao/mC4, all public -> A == B; mean divides by 3 sources",
     ),
     Stage(
-        "BGE-M3", "pretrain-B contrastive@512", "bge_512", "texts",
+        "BGE-M3", "pretrain", "pretrain-B contrastive@512", "bge_512", "texts",
         full=1.2e9 * 2, public=928.3e6 * 2, mean=928.3e6 / 4 * 2,
-        note="77% public (MTP 291.1M missing); 4 public tables",
+        note="77% public (MTP 291.1M missing); mean divides by 4 public tables",
     ),
     Stage(
-        "BGE-M3", "SFT@512", "bge_512", "texts",
+        "BGE-M3", "sft", "SFT@512", "bge_512", "texts",
         full=1.648e6 * 9, public=1.5755e6 * 9, mean=1.5755e6 / 16 * 9,
         note="9 texts/row (1 query + 1 pos + 7 neg); 17 sets full, 16 public",
     ),
     Stage(
-        "Qwen3-Emb-0.6B", "pretrain weak-sup@512", "qwen3_emb_512", "texts",
-        full=150e6 * 2, public=0, mean=0,
-        note="Qwen3-32B synthetic, unreleased",
+        "Qwen3-Rerank-8B", "pretrain", "none (no pretrain stage)", "reranker_640", "pairs",
+        full=0, public=0, mean=0,
+        note="paper starts from the Qwen3 base; nothing to walk",
     ),
     Stage(
-        "Qwen3-Emb-0.6B", "SFT@512", "qwen3_emb_512", "texts",
-        full=19e6 * 2, public=2.8e6 * 2, mean=2.8e6 / 12 * 2,
+        "Qwen3-Rerank-8B", "sft", "SFT@640", "reranker_640", "pairs",
+        full=19e6, public=2.8e6, mean=2.8e6 / 12,
         note="7M labeled + 12M synthetic; public = 40% of the 7M over 12 sets",
     ),
     Stage(
-        "Qwen3-Rerank-8B", "SFT@640", "reranker_640", "pairs",
-        full=19e6, public=2.8e6, mean=2.8e6 / 12,
-        note="same data as the embedding model, no pretrain stage",
-    ),
-    Stage(
-        "CLIP ViT-L/14", "pretrain@77", "clip_77", "pairs",
+        "CLIP ViT-L/14", "pretrain", "pretrain@77", "clip_77", "pairs",
         full=400e6, public=15e6, mean=15e6,
         note="WIT unreleased; YFCC filtered to 15M is the paper's own substitute",
     ),
     Stage(
-        "CLIP ViT-L/14", "SFT@77", "clip_77", "pairs",
+        "CLIP ViT-L/14", "sft", "SFT@77 (not in paper)", "clip_77", "pairs",
         full=0, public=106240, mean=106240,
         note="no such stage in the paper; our MSCOCO finetune",
     ),
 ]
 
 CALIBERS = ("full", "public", "mean")
+PHASES = ("pretrain", "sft")
 
 
 def gpu_hours(units: float, rate_per_s: float) -> float:
@@ -119,72 +114,89 @@ def main() -> None:
     args = ap.parse_args()
 
     totals = {c: 0.0 for c in CALIBERS}
-    sft_totals = {c: 0.0 for c in CALIBERS}
-    per_model: dict[str, dict[str, float]] = {}
+    phase_totals = {p: {c: 0.0 for c in CALIBERS} for p in PHASES}
+    # (model, phase) -> caliber -> GPU-h. Pretrain and SFT stay separate rows,
+    # because they are separately schedulable (and SFT is often skipped entirely).
+    cell: dict[tuple[str, str], dict[str, float]] = {}
+    model_totals: dict[str, dict[str, float]] = {}
 
     if args.markdown:
-        print("| model | stage | A paper-full | B public | C mean |")
-        print("|---|---|---|---|---|")
+        print("### Per stage（单卡 A100 实测吞吐 × 数据量 ÷ 3600）\n")
+        print("| model | phase | stage | unit | A paper-full | B public | C mean |")
+        print("|---|---|---|---|---|---|---|")
 
     for st in STAGES:
         hours = {c: gpu_hours(getattr(st, c), THROUGHPUT[st.rate]) for c in CALIBERS}
-        m = per_model.setdefault(st.model, {c: 0.0 for c in CALIBERS})
-        for c in CALIBERS:
-            totals[c] += hours[c]
-            m[c] += hours[c]
-        if st.stage.startswith("SFT"):
-            for c in CALIBERS:
-                sft_totals[c] += hours[c]
+        c = cell.setdefault((st.model, st.phase), {x: 0.0 for x in CALIBERS})
+        mt = model_totals.setdefault(st.model, {x: 0.0 for x in CALIBERS})
+        for x in CALIBERS:
+            totals[x] += hours[x]
+            c[x] += hours[x]
+            mt[x] += hours[x]
+            phase_totals[st.phase][x] += hours[x]
 
         if args.markdown:
             print(
-                f"| {st.model} | {st.stage} | "
-                + " | ".join(fmt(hours[c]) for c in CALIBERS)
+                f"| {st.model} | {st.phase} | {st.stage} | {st.unit} | "
+                + " | ".join(fmt(hours[x]) for x in CALIBERS)
                 + " |"
             )
         else:
-            print(f"{st.model} / {st.stage}  [{st.note}]")
-            for c in CALIBERS:
-                print(f"    {c:<7} {getattr(st, c):>16,.0f} {st.unit:<6} -> {hours[c]:>9,.0f} GPU-h")
+            print(f"{st.model} / {st.phase} / {st.stage}  [{st.note}]")
+            for x in CALIBERS:
+                print(f"    {x:<7} {getattr(st, x):>16,.0f} {st.unit:<6} -> {hours[x]:>9,.0f} GPU-h")
+
+    def row(label: str, h: dict[str, float], bold: bool = False) -> str:
+        vals = []
+        for x in CALIBERS:
+            days = h[x] / args.gpus / 24
+            v = f"{h[x]:,.0f} GPU-h / {days:.1f} d"
+            vals.append(f"**{v}**" if bold else v)
+        return f"| {label} | " + " | ".join(vals) + " |"
 
     if args.markdown:
-        print()
-        print("| model | A GPU-h | B GPU-h | C GPU-h | A days | B days | C days |")
-        print("|---|---|---|---|---|---|---|")
-        for model, h in per_model.items():
-            print(
-                f"| {model} | {h['full']:,.0f} | {h['public']:,.0f} | {h['mean']:,.0f} | "
-                f"{h['full'] / args.gpus / 24:.1f} | {h['public'] / args.gpus / 24:.1f} | "
-                f"{h['mean'] / args.gpus / 24:.1f} |"
-            )
-        print(
-            f"| **total** | **{totals['full']:,.0f}** | **{totals['public']:,.0f}** | "
-            f"**{totals['mean']:,.0f}** | **{totals['full'] / args.gpus / 24:.1f}** | "
-            f"**{totals['public'] / args.gpus / 24:.1f}** | "
-            f"**{totals['mean'] / args.gpus / 24:.1f}** |"
-        )
-        print()
-        print("| | A paper-full | B public | C mean |")
+        print("\n### 两阶段分列（单机 8 卡 A100）\n")
+        print("| 模型 | 阶段 | A 论文全量 | B 公开可得 | C 平均单集 |")
+        print("|---|---|---|---|---|")
+        for model in model_totals:
+            for phase in PHASES:
+                key = (model, phase)
+                if key not in cell:
+                    continue
+                label = "预训练" if phase == "pretrain" else "微调 SFT"
+                print(row(f"{model} · {label}", cell[key]))
+        print("\n### 阶段合计\n")
+        print("| 阶段 | A 论文全量 | B 公开可得 | C 平均单集 |")
         print("|---|---|---|---|")
-        print(f"| SFT only GPU-h | {sft_totals['full']:,.0f} | {sft_totals['public']:,.0f} | {sft_totals['mean']:,.0f} |")
-        print(
-            f"| SFT only {args.gpus}-GPU days | {sft_totals['full'] / args.gpus / 24:.1f} | "
-            f"{sft_totals['public'] / args.gpus / 24:.1f} | {sft_totals['mean'] / args.gpus / 24:.1f} |"
-        )
+        for phase in PHASES:
+            label = "预训练" if phase == "pretrain" else "微调 SFT"
+            print(row(label, phase_totals[phase]))
+        print(row("**总计**", totals, bold=True))
         return
 
     print()
-    for c in CALIBERS:
-        print(
-            f"{c:<7} {totals[c]:>10,.0f} GPU-h = {totals[c] / args.gpus:>8,.0f} "
-            f"{args.gpus}-GPU hours = {totals[c] / args.gpus / 24:>6.1f} days"
-        )
+    for model in model_totals:
+        for phase in PHASES:
+            key = (model, phase)
+            if key not in cell:
+                continue
+            h = cell[key]
+            print(
+                f"{model:<16}{'预训练' if phase == 'pretrain' else 'SFT':<8}"
+                f"full {h['full']:>8,.0f}  public {h['public']:>8,.0f}  mean {h['mean']:>8,.0f} GPU-h"
+            )
     print()
-    for c in CALIBERS:
-        print(
-            f"SFT only ({c}): {sft_totals[c]:>9,.0f} GPU-h "
-            f"({sft_totals[c] / args.gpus / 24:.1f} days)"
-        )
+    for phase in PHASES:
+        label = "pretrain" if phase == "pretrain" else "sft"
+        for x in CALIBERS:
+            h = phase_totals[phase][x]
+            print(f"{label:<9}{x:<7} {h:>9,.0f} GPU-h = {h / args.gpus:>7,.0f} "
+                  f"8-GPU h = {h / args.gpus / 24:>6.1f} days")
+    print()
+    for x in CALIBERS:
+        h = totals[x]
+        print(f"{'TOTAL':<16}{x:<7} {h:>9,.0f} GPU-h = {h / args.gpus:>7,.0f} "
+              f"8-GPU h = {h / args.gpus / 24:>6.1f} days")
 
 
 if __name__ == "__main__":
