@@ -273,13 +273,35 @@ class _RowStream(Iterator[list[list[str]]]):
         self.microbatches_per_step = 1
         self.buffer: list[list[str]] = []
         self.buffer_rows = 0
+        # Rows already taken from the loader but not yet handed to a
+        # micro-batch; see _fill.
+        self.pending_rows: list[dict[str, Any]] = []
 
     def reset(self) -> None:
         self.loader = iter(self.loader)
         self.buffer = []
         self.buffer_rows = 0
+        self.pending_rows = []
 
     def _fill(self, want_rows: int) -> None:
+        """Buffer at least ``want_rows`` rows, taking only what is needed.
+
+        The loader hands over ``batch_size`` rows at a time while a micro-batch
+        may want fewer, so the leftover rows of a loader batch must be carried
+        over -- not dropped.  Two earlier versions got this wrong in opposite
+        directions:
+
+        * buffering the whole loader batch made the first micro-batch consume
+          two rows' worth of pairs ("hidden batch 2 != len(lengths)=4");
+        * breaking out of the loop without keeping the rest discarded 31 of
+          every 32 rows, so a 306,806-row corpus was exhausted after ~299 steps
+          of a 9,587-step epoch ("training loader produced no rows" at step 295).
+        """
+
+        # Drain rows left over from the previous loader batch first.
+        while self.pending_rows and self.buffer_rows < want_rows:
+            self._emit_row(self.pending_rows.pop(0))
+
         while self.buffer_rows < want_rows:
             try:
                 batch = next(self.loader)
@@ -289,24 +311,37 @@ class _RowStream(Iterator[list[list[str]]]):
                 if batch is None:
                     raise RuntimeError("training loader produced no rows") from None
             anchors = batch["anchor"]
-            for index, anchor in enumerate(anchors):
-                pair_list = [[anchor, batch["positive"][index]]]
-                for key in sorted(k for k in batch if k.startswith("negative")):
-                    pair_list.append([anchor, batch[key][index]])
-                if len(pair_list) != self.pairs_per_row:
-                    raise RuntimeError(
-                        f"row expands to {len(pair_list)} pairs but config says "
-                        f"{self.pairs_per_row}"
-                    )
-                self.buffer.extend(pair_list)
-                self.buffer_rows += 1
-                # Stop as soon as this micro-batch is full.  The loader hands
-                # over `batch_size` rows at once, but a micro-batch may want
-                # fewer; without this break the whole loader batch was buffered
-                # and the first micro-batch consumed two rows' worth of pairs
-                # ("hidden batch 2 != len(lengths)=4").
+            rows = [
+                {
+                    "anchor": anchor,
+                    "positive": batch["positive"][index],
+                    **{
+                        key: batch[key][index]
+                        for key in sorted(k for k in batch if k.startswith("negative"))
+                    },
+                }
+                for index, anchor in enumerate(anchors)
+            ]
+            for position, row in enumerate(rows):
                 if self.buffer_rows >= want_rows:
-                    break
+                    # Keep the untouched remainder for the next micro-batch.
+                    self.pending_rows.extend(rows[position:])
+                    return
+                self._emit_row(row)
+
+    def _emit_row(self, row: dict[str, Any]) -> None:
+        """Expand one dataset row into its pairs and append them to the buffer."""
+
+        pair_list = [[row["anchor"], row["positive"]]]
+        for key in sorted(k for k in row if k.startswith("negative")):
+            pair_list.append([row["anchor"], row[key]])
+        if len(pair_list) != self.pairs_per_row:
+            raise RuntimeError(
+                f"row expands to {len(pair_list)} pairs but config says "
+                f"{self.pairs_per_row}"
+            )
+        self.buffer.extend(pair_list)
+        self.buffer_rows += 1
 
     def __iter__(self) -> "_RowStream":
         return self
