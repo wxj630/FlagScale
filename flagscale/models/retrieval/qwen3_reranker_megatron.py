@@ -70,7 +70,7 @@ def build_megatron_config(
             "QKV layout is group-interleaved and a TP shard of it has not been "
             "validated against the HF checkpoint."
         )
-    return TransformerConfig(
+    config = TransformerConfig(
         num_layers=hf["num_hidden_layers"],
         hidden_size=hf["hidden_size"],
         num_attention_heads=hf["num_attention_heads"],
@@ -107,6 +107,19 @@ def build_megatron_config(
         recompute_method="uniform" if recompute else None,
         recompute_num_layers=1 if recompute else None,
     )
+
+    # Qwen3 uses rope_theta=1e6; Megatron's TransformerConfig default is 1e4.
+    # It has to be set on the config object, not just passed to GPTModel:
+    # GPTModel does ``if hasattr(self.config, 'rotary_base'): self.rotary_base =
+    # self.config.rotary_base``, so a config carrying the default silently wins
+    # over the constructor argument.  rotary_base is an attribute rather than a
+    # TransformerConfig kwarg, hence the setattr.
+    #
+    # The wrong base is invisible to shape checks but fatal to the numbers: the
+    # first decoder layer's attention output had cosine 0.94 against HF and the
+    # whole model 0.04, so BCE ran at 3.7-5.7 instead of ~0.43 and reached NaN.
+    config.rotary_base = int(hf.get("rope_theta", 10000))
+    return config
 
 
 def build_megatron_model(
