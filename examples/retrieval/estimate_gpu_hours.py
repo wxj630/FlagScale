@@ -73,15 +73,12 @@ STAGES = [
         "BGE-M3", "pretrain", "pretrain-A RetroMAE@8192", "bge_8192", "texts",
         full=184e6, public=184e6, mean=184e6 / 3,
         note="Pile/Wudao/mC4, all public -> A == B; mean divides by 3 sources",
-        # 20,000 steps. Whether "batch size 32" is per-GPU or the 32-GPU total
-        # changes the answer 32x, and the paper does not say. We use the global
-        # reading: 32 total x GA 16 = 512/step -> 10.24M samples -> 0.056 passes
-        # (80B tokens). The per-GPU reading implies 32 samples of 8192 tokens on
-        # one 40GB card, whose attention matrices alone are 68.7 GB, so it is
-        # physically excluded. See docs section 11.2.
-        paper_epochs=10.24e6 / 184e6,
-        paper_absolute=10.24e6,
-        paper_absolute_hi=327.68e6,
+        # 20,000 steps x (32 per-GPU x GA 16 x 32 GPUs) = 327.68M samples, i.e.
+        # 1.78 passes of the 184M set. "batch size 32" must be the per-device
+        # micro-batch: 32 GPUs x GA 16 puts the global batch at >= 512, so a
+        # global reading of 32 is not even expressible. See docs section 11.2.
+        paper_epochs=327.68e6 / 184e6,
+        paper_absolute=327.68e6,
     ),
     Stage(
         "BGE-M3", "pretrain", "pretrain-B contrastive@512", "bge_512", "texts",
@@ -207,6 +204,40 @@ def stage_rate(model: str, phase: str, dataset: str) -> str:
     return "bge_512"
 
 
+# How many passes over each dataset the paper's own schedule amounts to.
+# BGE's two pretraining stages are pinned by step counts, so their pass count is
+# derived rather than stated; the SFT and reranker schedules are not published at
+# all, so 3 passes is our assumption (marked with * in the output).
+PAPER_PASSES = {
+    ("BGE-M3", "pretrain"): 327.68e6 / 184e6,   # 20,000 steps, 1.78 passes
+    ("BGE-M3", "sft"): 3.0,                      # assumed
+    ("CLIP ViT-L/14", "pretrain"): 32.0,         # stated by the paper
+    ("CLIP ViT-L/14", "sft"): 3.0,               # assumed
+    ("Qwen3-Rerank-8B", "sft"): 3.0,             # assumed
+}
+ASSUMED_PASSES = {("BGE-M3", "sft"), ("CLIP ViT-L/14", "sft"), ("Qwen3-Rerank-8B", "sft")}
+
+
+# 25,000 steps x 29,216 (mean of the paper's nine length buckets) = 730.4M pairs
+# drawn from the 1.2B pool. The contrastive stage therefore has an ABSOLUTE
+# sample budget, so each dataset's share is that budget divided by the caliber
+# total -- not a fixed per-dataset pass count.
+CONTRASTIVE_PAIRS_DRAWN = 29_216 * 25_000
+
+
+def paper_passes(model: str, phase: str, dataset: str, caliber_pool: float) -> float:
+    """Passes over one dataset implied by the paper's schedule.
+
+    Every stage except the contrastive one is a per-dataset repeat count. The
+    contrastive stage draws a fixed 730.4M pairs from whichever pool you hold,
+    so a smaller caliber means more passes over each of its datasets for the
+    same total work -- which is why its cost is caliber-independent.
+    """
+    if model == "BGE-M3" and phase == "pretrain" and "RetroMAE" not in dataset:
+        return CONTRASTIVE_PAIRS_DRAWN / caliber_pool
+    return PAPER_PASSES[(model, phase)]
+
+
 def dataset_tables(gpus: int) -> None:
     """Per-dataset sizes and cost, for calibers A and B separately.
 
@@ -218,23 +249,39 @@ def dataset_tables(gpus: int) -> None:
         ("public", 4, "B 公开可得"),
     ):
         print(f"### 口径 {title}：逐数据集\n")
-        print("| 模型 | 阶段 | 数据集 | 数据量 | 单 epoch GPU-h | 备注 |")
-        print("|---|---|---|---|---|---|")
+        print("| 模型 | 阶段 | 数据集 | 数据量 | 单遍 GPU-h | "
+              "论文遍数 | 论文量 GPU-h | 备注 |")
+        print("|---|---|---|---|---|---|---|---|")
+        # Pool the contrastive stage samples from, for this caliber.
+        pool_contrastive = (
+            sum(r[field - 3] for mo, ph, n, u, *r in DATASETS
+                if mo == "BGE-M3" and ph == "pretrain" and "RetroMAE" not in n)
+        )
         subtotal = 0.0
+        paper_subtotal = 0.0
         for model, phase, name, unit, *rest in DATASETS:
             size = rest[field - 3]
             note = rest[-1]
             if size <= 0:
                 continue
+            rate = stage_rate(model, phase, name)
             multiplier = UNIT_MULTIPLIER[model][unit]
-            hours = gpu_hours(size * multiplier, THROUGHPUT[stage_rate(model, phase, name)])
+            hours = gpu_hours(size * multiplier, THROUGHPUT[rate])
+            passes = paper_passes(model, phase, name, pool_contrastive)
+            paper_hours = hours * passes
             subtotal += hours
+            paper_subtotal += paper_hours
             unit_cn = {"texts": "条文本", "pairs": "对", "rows": "行"}[unit]
             shown = f"{size / 1e6:,.1f}M {unit_cn}"
             if unit == "rows":
                 shown += " × 9 texts"
-            print(f"| {model} | {phase} | {name} | {shown} | {hours:,.1f} | {note} |")
-        print(f"\n**小计 {subtotal:,.0f} GPU-h = {subtotal / gpus / 24:.1f} 天**\n")
+            # * marks a pass count we assumed, not one the paper states
+            mark = " †" if (model, phase) in ASSUMED_PASSES else ""
+            print(f"| {model} | {phase} | {name} | {shown} | {hours:,.1f} | "
+                  f"{passes:.2f}×{mark} | {paper_hours:,.1f} | {note} |")
+        print(f"\n**小计：单遍 {subtotal:,.0f} GPU-h；论文量 {paper_subtotal:,.0f} GPU-h "
+              f"= {paper_subtotal / gpus / 24:.1f} 天**  "
+              f"（† = 遍数是假设值，论文未给）\n")
 
 
 def paper_epoch_tables(gpus: int) -> None:
