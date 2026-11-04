@@ -31,8 +31,11 @@ THROUGHPUT = {
     # attention is O(L^2), so the true value can be 2x lower. Biggest uncertainty
     # in the whole estimate; unblock by running ~100 RetroMAE steps at 8192.
     "bge_8192": 7.4,
-    # 07-a100.md: 5.51 pairs/s across 2 cards, so 2.755 per card.
-    "reranker_640": 5.51 / 2,
+    # 07-a100.md: 7.62 pairs/s across 2 cards (16.8 s/step, 128 pairs/step),
+    # so 3.81 per card.  The old 5.51 was wrong twice over: it used 7,670
+    # steps/epoch where the log shows 4,790, and counted 64 *rows* per step as
+    # 64 *pairs* although each row yields one positive plus one negative.
+    "reranker_640": 7.62 / 2,
     # 07-a100.md: 318,720 samples / 2,679.1 s.
     "clip_77": 119.0,
 }
