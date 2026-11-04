@@ -336,14 +336,27 @@ def save_model(
             for k, p in unwrap_model(model).named_parameters()
             if k.startswith("backbone.")
         }
-        restored, mismatched = {}, []
+        restored, mismatched, trimmed = {}, [], []
         for key, tensor in weights.items():
             want = reference.get(key)
+            if want is not None and want.numel() and tensor.numel() > want.numel():
+                # The two largest tensors (embed_tokens, lm_head) come back from
+                # the FSDP2 gather with trailing padding: 621,240,319 elements
+                # where the parameter is 621,236,224 -- 4095 extra. That count is
+                # odd and cannot be any real bf16 weight shape, so it is slack at
+                # the end of the buffer rather than a different tensor layout.
+                # Trim before reshaping; without this the save raised and the
+                # whole epoch's checkpoint was lost.
+                slack = tensor.numel() - want.numel()
+                tensor = tensor[: want.numel()]
+                trimmed.append(f"{key}: dropped {slack} trailing elements")
             if want is not None and tensor.shape != want and tensor.numel() == want.numel():
                 tensor = tensor.reshape(want)
             elif want is not None and tensor.numel() != want.numel():
                 mismatched.append(f"{key}: {tuple(tensor.shape)} vs {tuple(want)}")
             restored[key] = tensor
+        for note in trimmed:
+            log(f"checkpoint: {note}")
         if mismatched:
             raise RuntimeError(
                 "FSDP2 checkpoint cannot be reshaped to the model's parameters, so "
