@@ -1431,12 +1431,41 @@ CLIP 的卡时可以直接算（论文给了天数）；BGE 的需要用我们�
 **Reranker 一个人占 89%**。这也是为什么实际做法是：reranker 只保留
 `checkpoint-epoch-1`（val 最优）与末轮，中间轮次删掉。
 
-### 18.4 已实测的对账
+### 18.4 实测对账（2026-11-04，A100 机器 `du`）
 
-| 项 | 理论值 | 实测 | 一致性 |
-|---|---|---|---|
-| Qwen3-Reranker base 权重（bf16 分片） | 16.38 GB | **5 个分片** `model-0000X-of-00005.safetensors` | ✅ 每片约 3.3 GB |
-| 训练产出 `model.safetensors`（fp32 master） | 32.76 GB | 单个文件 33 GB 量级 | ✅ |
+**文件大小反过来精确验证了三个参数量**：
+
+| 模型 | 权重文件 | 大小 | ÷ 字节宽度 | 反推参数量 | 与文档值 |
+|---|---|---|---|---|---|
+| BGE-M3 | `pytorch_model.bin` | 2,166 MiB | ÷ 4（fp32） | **567.8M** | ✅ 568M |
+| CLIP | `model.safetensors` | 1,632 MiB | ÷ 4（fp32） | **427.8M** | ✅ 428M |
+| Reranker-8B | 5 个 bf16 分片合计 | 15,622 MiB | ÷ 2（bf16） | **8,191M** | ✅ 8.19B |
+
+**但磁盘实际占用远大于"一份半精度权重"**，因为官方仓库带了多份不同格式的副本：
+
+| 模型 | 目录实际占用 | 构成 |
+|---|---|---|
+| **BGE-M3** | **4,375 MiB（4.3 GiB）** | `pytorch_model.bin` 2,166M（**fp32**）+ `onnx/model.onnx_data` 2,162M（ONNX 副本）+ 两个 M3 头 `colbert_linear.pt` 3M / `sparse_linear.pt` 1M |
+| **CLIP ViT-L/14** | **6,530 MiB（6.4 GiB）** | **同一份权重存了 4 种格式**：`pytorch_model.bin`、`model.safetensors`、`tf_model.h5`、`flax_model.msgpack`，各 1,632 MiB（都是 **fp32**） |
+| **Qwen3-Reranker-8B** | **16 GiB** | 5 个 bf16 分片（3,842 / 3,873 / 3,857 / 2,865 / 1,185 MiB），**只有一种格式** |
+
+三个反直觉的点：
+
+1. **BGE-M3 和 CLIP 的官方权重是 fp32，不是半精度。** 我们要的"半精度存储"
+   （1.14 / 0.86 GB）需要**自己转换**，磁盘上没有现成的。实测都是 fp32，
+   正好是理论值的 2 倍（2.17 / 1.63 GB ✓）。
+2. **CLIP 存了 4 份完全相同的权重**（PyTorch / safetensors / TensorFlow / Flax），
+   6.5 GB 里只有 1.6 GB 是需要的。删掉 `tf_model.h5` 和 `flax_model.msgpack`
+   可省 **3.2 GB**。BGE-M3 的 `onnx/` 目录同理可省 **2.1 GB**。
+3. **只有 Qwen3-Reranker 是 bf16**（HuggingFace 官方发布就是 bf16），
+   且分片大小不均匀（最大 3,873M、最小 1,185M），不是均匀切分。
+
+**训练产出的 checkpoint**（fp32 master，14 B/参数）：
+
+| 模型 | 理论 | 依据 |
+|---|---|---|
+| Reranker-8B | **114.7 GB** | 8.19B × 14 B。实测 base 的 bf16 是 16.38 GB（8.19B × 2 B），换算关系吻合 |
 
 > ⚠️ 磁盘容量按 **GB（10³）** 算，`nvidia-smi` / `torch` 按 **GiB（2³⁰）** 算。
 > 8.19B 的 bf16 权重是 **16.38 GB = 15.26 GiB**，两个数都对，别混用。
+> 上表 `du` 输出是 **MiB**（2³⁰），换算到 GB 要 ×1.048。
