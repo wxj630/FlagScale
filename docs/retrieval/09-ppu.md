@@ -54,6 +54,30 @@
 是**训练过程中内存权重**算出来的（这个数本身有效），但**落盘的权重
 无法恢复**，因此"拿去评测"这件事从来没成功过。
 
+### 重跑 reranker 时踩到的两个启动坑
+
+用容器 `flagos-retrieval`（映射 `ppu12` + `ppu13` 两张卡）重跑，第一次
+两次都没起来，原因都不在模型代码：
+
+| 报错 | 原因 | 修法 |
+|---|---|---|
+| `/flagos-search-codes/torch-fl-cuda/.venv/bin/activate: No such file` | 容器里没有 venv，Python 就是 `/usr/local/bin/python`，但 `FLAGSCALE_PYTHON_ENV` 从别处继承了 A100 的路径 | `export FLAGSCALE_PYTHON_ENV=/usr/local` |
+| `NCCL ERROR Bootstrap : no socket interface found`<br>`ncclInternalError: Internal check failed` | 没指定网卡，XCCL 找不到可用接口 | **`export NCCL_SOCKET_IFNAME=bond0`** |
+
+第二条在 `examples/retrieval/run-ppu-three.sh` 里本来就有，我手写启动命令时漏了。
+**在 PPU 上跑任何多卡任务，这条是必需的。**
+
+### 清理：删掉 138 GiB 的无效 checkpoint
+
+磁盘此前 97% 满（342 GB 可用 / 11 TB）。删除前逐个验证过，三个 epoch + 最终权重
+**共 4 份、全部 `BROKEN (default init)`**：
+
+```bash
+rm -rf qwen3_reranker/checkpoint-epoch-{1,2,3} qwen3_reranker/model.safetensors
+```
+
+释放 168 GB（可用 342 G → 510 G），保留了 16 GB 的原始预训练权重。
+
 ### BGE：唯一完全可信的一组
 
 | | R@1 | R@5 | R@10 | MRR |
