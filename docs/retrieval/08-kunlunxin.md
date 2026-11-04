@@ -237,6 +237,25 @@ base 指标比；**吞吐**按 docx 定义（训练集总样本数 ÷ 训练总�
 **FlagScale 版本没有这个 bug**：它在训练前 `reanchor_schedule(14379)`，
 日志确认 `lr schedule anchored: cosine 1e-07 -> 1e-08`。
 
+### ⚠️ 所有历史昆仑芯 reranker 结论作废：评的是 `logit['icken']`
+
+2026-11-04 发现 `train_retrieval.py` 的 `false_token_id` 默认值是 **9692**，
+它解码出来是 `'icken'`，不是 `'no'`（`'no'` 是 **2152**）。配置里从来没有
+显式设过这个键，所以**所有走 Megatron 路径的昆仑芯 reranker run 都在算**
+`logit[yes] − logit['icken']`：
+
+| 影响 | 说明 |
+|---|---|
+| 受影响 | 昆仑芯 Megatron 路径的**全部** reranker run（seq=256 的 3600 步、seq=640 的尝试、8 卡 16N 实验） |
+| 不受影响 | A100 / PPU / 昇腾的 FSDP2 路径（`qwen3_reranker.py` 一直是 2152），以及 BGE / CLIP / Embedding |
+
+**所以本文档里昆仑芯 reranker 的历史收敛/精度结论一律不能引用**，
+包括此前记录的"发散"、"eval acc 0.88"、"最佳权重 step 3000" 等。
+**吞吐数字仍有效**（它测的是步速，与打分无关）。
+
+修复后同一 prompt 的分数：**+4.55 → −1.83**（HF 参考 −1.00）；
+BCE **5.65 → 0.58-0.96**；val loss **7.31/NaN → 0.5947**。
+
 ### 合并后的首次实测（2026-11-03，新机器 8 卡）
 
 **结论：跑不起来，卡在第一个 forward。**
