@@ -21,6 +21,7 @@ import json
 import math
 import os
 import sys
+import time
 from pathlib import Path
 
 # torch-fl must claim the PrivateUse1 slot before the first flagos tensor is
@@ -92,7 +93,10 @@ def _batched(items: list, batch_size: int):
 
 
 @torch.no_grad()
-def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int, negative_keys: list[str]):
+def evaluate_ranked(
+    model, rows: list[dict], task: str, device, batch_size: int, negative_keys: list[str],
+    clock: "InferenceClock | None" = None,
+):
     """Rank each query's positive against its hard negatives.
 
     Returns ``(ranks, predictions)``. ``predictions`` keeps the per-query score
@@ -114,7 +118,8 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
                 for doc in docs:
                     pair_lists.append([row["anchor"], doc])
                 groups.append(len(docs))
-            scores = reranker_batch(model, pair_lists, device)
+            call = clock if clock is not None else (lambda fn, *a, **k: fn(*a, **k))
+            scores = call(reranker_batch, model, pair_lists, device)
             offset = 0
             for row_index, size in enumerate(groups):
                 block = scores[offset : offset + size]
@@ -135,10 +140,13 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
                     }
                 )
         else:
-            anchor_emb = embedding_batch(model, anchors, device)
+            call = clock if clock is not None else (lambda fn, *a, **k: fn(*a, **k))
+            anchor_emb = call(embedding_batch, model, anchors, device)
             candidate_blocks = []
             for key in ["positive", *negative_keys]:
-                candidate_blocks.append(embedding_batch(model, [row[key] for row in chunk], device))
+                candidate_blocks.append(
+                    call(embedding_batch, model, [row[key] for row in chunk], device)
+                )
             candidates = torch.stack(candidate_blocks, dim=1)  # (B, 1+K, D)
             scores = torch.einsum("bd,bkd->bk", anchor_emb, candidates)
             positive = scores[:, :1]
@@ -171,6 +179,77 @@ def evaluate_ranked(model, rows: list[dict], task: str, device, batch_size: int,
 
 def _mrr(ranks: list[int]) -> float:
     return sum(1.0 / rank for rank in ranks) / len(ranks) if ranks else 0.0
+
+
+class InferenceClock:
+    """Accumulate wall time spent *inside the model*, not around it.
+
+    Inference throughput cannot be recovered from an eval JSON after the fact:
+    the file records only samples and metrics, and the mtime also covers model
+    loading and writing a multi-hundred-MB predictions file.  So time the
+    forward pass as it happens.
+
+    Device work is asynchronous, so each measurement is bracketed by a
+    synchronize; without it the elapsed time measures kernel *launch*, far
+    below the real cost.  Data loading and the CPU-side rank bookkeeping stay
+    outside the brackets: this is inference throughput, the analogue of the
+    training numbers' pairs/s, not a wall clock that includes the dataloader.
+    """
+
+    def __init__(self, device) -> None:
+        self.device = device
+        self.seconds = 0.0
+
+    def sync(self) -> None:
+        device_type = getattr(self.device, "type", "")
+        if device_type == "cuda":
+            torch.cuda.synchronize()
+        elif device_type == "npu" and hasattr(torch, "npu"):
+            torch.npu.synchronize()
+        elif device_type == "xpu" and hasattr(torch, "xpu"):
+            torch.xpu.synchronize()
+
+    def __call__(self, fn, *args, **kwargs):
+        self.sync()
+        started = time.perf_counter()
+        out = fn(*args, **kwargs)
+        self.sync()
+        self.seconds += time.perf_counter() - started
+        return out
+
+    def samples_per_second(self, items: int) -> float:
+        return items / self.seconds if self.seconds > 0 else float("nan")
+
+
+def _inference_items(task: str, rows: int, negative_keys: list[str]) -> int:
+    """How many model inputs one evaluation pass actually encodes.
+
+    Throughput has to name its unit or it means nothing.  For an embedding task
+    each query costs one anchor plus one positive plus every negative, so
+    ``rows * (1 + len(negative_keys))`` text encodings.  A reranker scores each
+    (query, document) pair separately, which is the same count in *pairs* --
+    the unit differs, the number matches, and both mirror what the training
+    tables report so the two can sit side by side.
+    """
+
+    return rows * (1 + len(negative_keys))
+
+
+def _inference_block(clock: "InferenceClock", items: int) -> dict:
+    """Model-only timing, ready to drop into the result JSON.
+
+    ``model_seconds`` excludes data loading and the CPU-side rank bookkeeping
+    on purpose (see InferenceClock); ``samples_per_s`` therefore reads as
+    "inputs the accelerator can score per second", which is the quantity a
+    deployment decision needs and the one comparable across platforms.
+    """
+
+    return {
+        "items_scored": int(items),
+        "model_seconds": round(clock.seconds, 3),
+        "samples_per_s": round(clock.samples_per_second(items), 3),
+        "scope": "model forward only; dataloader and CPU ranking excluded",
+    }
 
 
 @torch.no_grad()
@@ -236,13 +315,14 @@ def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tupl
     text_embeddings: list[torch.Tensor] = []
     image_embeddings: list[torch.Tensor] = []
     for index, chunk in enumerate(_batched(rows, batch_size)):
+        call = clock if clock is not None else (lambda fn, *a, **k: fn(*a, **k))
         if task == "clip":
-            text_emb, image_emb = _clip_embeddings(model, chunk, device)
+            text_emb, image_emb = call(_clip_embeddings, model, chunk, device)
         else:
             text_inputs = [{"text": row["text"]} for row in chunk]
             image_inputs = [{"image": row["image"]} for row in chunk]
-            text_emb = embedding_batch(model, text_inputs, device)
-            image_emb = embedding_batch(model, image_inputs, device)
+            text_emb = call(embedding_batch, model, text_inputs, device)
+            image_emb = call(embedding_batch, model, image_inputs, device)
         text_embeddings.append(text_emb.float().cpu())
         image_embeddings.append(image_emb.float().cpu())
         if (index + 1) % 20 == 0:
@@ -272,6 +352,7 @@ def evaluate_in_batch_streaming(
     task: str = "",
     row_chunk: int = 1024,
     keep_scores: bool = False,
+    clock: "InferenceClock | None" = None,
 ) -> dict:
     """Full-set image/text retrieval, encoding straight from the stream.
 
@@ -502,6 +583,7 @@ def main() -> None:
         }
     )
     dataset = build_dataset(args.task, data_cfg, args.data_path, args.split, args.max_samples)
+    clock = InferenceClock(device)
 
     if args.task in {"clip", "vl_embedding"}:
         # Stream instead of materialising every row: each row holds a decoded PIL
@@ -510,15 +592,20 @@ def main() -> None:
         # Only the embeddings need to persist.
         metrics = evaluate_in_batch_streaming(
             model, dataset, device, args.batch_size, (1, 5, 10), args.task,
-            keep_scores=bool(args.save_predictions),
+            keep_scores=bool(args.save_predictions), clock=clock,
         )
         predictions = metrics.pop("predictions", None)
+        samples = metrics.pop("samples")
         result = {
             "model_type": args.model_type,
             "task": args.task,
             "checkpoint": model_path,
             "split": args.split,
-            "samples": metrics.pop("samples"),
+            "samples": samples,
+            # One batch encodes both a text and an image, so the item count is
+            # 2 x samples; reported separately from the metric block because it
+            # is a speed measurement, not a quality one.
+            "inference": _inference_block(clock, 2 * samples),
             "metrics": metrics,
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -546,7 +633,7 @@ def main() -> None:
     # sorting the batch max tracks the local length instead.
     rows.sort(key=lambda row: len(row.get("anchor", "")) + len(row.get("positive", "")))
     ranks, predictions = evaluate_ranked(
-        model, rows, args.task, device, args.batch_size, negative_keys
+        model, rows, args.task, device, args.batch_size, negative_keys, clock=clock
     )
     # 20 is included because the recommender baselines in the evaluation
     # spreadsheet report Recall@20 / NDCG@20 (LightGCN), and 100 because
@@ -562,6 +649,7 @@ def main() -> None:
         "checkpoint": model_path,
         "split": args.split,
         "samples": len(rows),
+        "inference": _inference_block(clock, _inference_items(args.task, len(rows), negative_keys)),
         "metrics": metrics,
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
