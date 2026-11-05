@@ -1028,8 +1028,14 @@ def save_megatron_stage(trainer: Any, target: Path, **_legacy: Any) -> None:
     destination = target / f"stage{trainer.pp_rank}.pt"
     torch.save(state, destination)
     # max() over an empty generator raises, and on the last rank every entry but
-    # the final norm can be lazy/None, leaving state empty.
-    peak = max((float(t.abs().max()) for t in state.values()), default=float("nan"))
+    # the final norm can be lazy/None, leaving state empty.  `isinstance` rather
+    # than a bare generator: stage_state already filters to tensors, but this
+    # line runs after the file is written, so a surprise entry here would turn a
+    # successful save into a failed epoch.
+    peak = max(
+        (float(t.abs().max()) for t in state.values() if isinstance(t, torch.Tensor)),
+        default=float("nan"),
+    )
     log(f"saved {destination} ({len(state)} tensors, max|w|={peak:.3f})")
     if trainer.world_size > 1:
         torch.distributed.barrier()

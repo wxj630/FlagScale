@@ -894,9 +894,13 @@ class MegatronPipelineTrainer:
             # stay None; calling .detach() on one raised
             # "'NoneType' object has no attribute 'detach'" and killed every
             # epoch save.  They carry no weights, so skip them.
-            if tensor is None:
-                continue
-            if not hasattr(tensor, "detach"):
+            #
+            # Test for a Tensor rather than for `.detach`: `state_dict()` may
+            # hand back objects that expose detach but not the tensor ops the
+            # save path uses.  `hasattr(tensor, "detach")` let one through and
+            # `t.abs()` in save_megatron_stage then raised
+            # "'X' object has no attribute 'abs'", losing the epoch.
+            if not isinstance(tensor, torch.Tensor):
                 continue
             value = tensor.detach().to("cpu", dtype=dtype)
             if not torch.isfinite(value).all():
