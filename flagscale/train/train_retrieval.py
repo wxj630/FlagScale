@@ -486,7 +486,12 @@ def init_wandb(train_cfg: DictConfig, model_cfg: DictConfig, output_dir: Path) -
 
 
 def reduce_metrics(total_loss: float, count: int, device: torch.device) -> float:
-    values = torch.tensor([total_loss, float(count)], dtype=torch.float64, device=device)
+    # HCCL does not implement float64 all-reduce
+    # ("HCCL allreduce: Unsupported data type at::kDouble"). Loss averages do
+    # not need double precision, so use float32 on NPU and keep float64
+    # elsewhere for bit-compatible CUDA comparisons.
+    dtype = torch.float32 if device.type == "npu" else torch.float64
+    values = torch.tensor([total_loss, float(count)], dtype=dtype, device=device)
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(values, op=dist.ReduceOp.SUM)
     return float(values[0].item() / max(values[1].item(), 1.0))

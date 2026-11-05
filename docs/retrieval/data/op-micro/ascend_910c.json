@@ -1,0 +1,16 @@
+{
+  "mm_hidden": 0.076,
+  "mm_ffn": 0.2661,
+  "mm_lm_head": 7.9005,
+  "flash_attn_fwd": 1.8191,
+  "rms_norm": 0.1559,
+  "layer_norm": 0.0949,
+  "silu": 0.0466,
+  "gelu": 0.053,
+  "add": 0.0453,
+  "mul": 0.044,
+  "sum_last": 0.0552,
+  "softmax": 0.0731,
+  "bmm_scores": 0.0983,
+  "cross_entropy": 0.2748
+}

@@ -1,0 +1,31 @@
+{
+  "model_type": "bge_m3",
+  "task": "embedding",
+  "checkpoint": "/flagos-retrieval-models/bge-m3/bge-m3",
+  "split": "test",
+  "samples": 2000,
+  "inference": {
+    "items_scored": 32000,
+    "model_seconds": 206.131,
+    "samples_per_s": 155.241,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "count": 2000,
+    "recall@1": 0.702,
+    "recall@5": 0.9635,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.8117269841269849,
+    "mean_rank": 1.664,
+    "ndcg@1": 0.702,
+    "ndcg@5": 0.845368447127765,
+    "ndcg@10": 0.858290241624277,
+    "ndcg@20": 0.858290241624277,
+    "hit@1": 0.702,
+    "hit@5": 0.9635,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}
