@@ -162,50 +162,61 @@ export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:${PY
 | torchrun 丢了环境变量 | 子进程内打印 → `FLAGSCALE_DEVICE='flagos'` | ❌ 环境在 |
 | runner 重写 PYTHONPATH | 生成的脚本第 14 行是 `...:${PYTHONPATH}`，保留了 | ❌ 没丢 |
 
-**已定位到确切失败点（2026-11-05，在真实失败的进程里插桩得到）**：
+**已定位到精确现象，但根因仍未确定（2026-11-05，真实进程内插桩）**：
 
 ```
+PROBE7 is_available called; has torch.flagos = True
+PROBE7 -> is_available() = False          ← 真实运行
 PROBE3 PLATFORMS= [] torch.flagos= True
-PROBE EXC: RuntimeError No available platform detected.
-           Ensure CUDA, NPU (torch_npu), or MUSA (torch_musa) is installed.
 ```
 
-即：`torch.flagos` **存在且 is_available() 为 True**，但
-`flagscale.platforms.platform_register.PLATFORMS` 是**空字典**，
-于是 `get_platform()` 走到最后一行 `raise RuntimeError`。
+同一台机器、同一环境、同样 `import torch_fl` 之后**手动**测：
 
-`register_platforms()` 在 `flagscale/platforms/__init__.py` 导入时执行一次，
-之后不重建。它逐个调 `PlatformFlagOS().is_available()` →
-`torch.flagos.is_available()`。真实运行里这一步返回了 False（或抛
-`AttributeError` 被吞掉），所以 `PLATFORMS` 没有任何条目。
+```
+before: True        ← is_available() 直接就是 True
+count: 2
+after: True
+```
 
-**但同一台机器、同一环境、手动执行时 `PLATFORMS == ['flagos', 'cuda']`。**
-下面这些都单独验证过、全部正常，所以问题不在它们身上：
+即 `PlatformFlagOS.is_available()`（= `torch.flagos.is_available()`
+= `_C._get_device_count() > 0`）在真实运行里返回 **False**、手动测返回 **True**。
+于是 `register_platforms()` 什么也没注册，`PLATFORMS` 为空，
+`get_platform()` 走到 `raise RuntimeError("No available platform detected")`。
+
+**已排除（全部实测，不要再重复）**：
 
 | 验证项 | 结果 |
 |---|---|
-| `torch_fl` 可导入 | ✅ `/workspace/Torch-FL/torch_fl/__init__.py` |
-| `torch.flagos` 属性存在 | ✅ `True` |
-| `torch.flagos.is_available()` | ✅ `True` |
-| `PlatformFlagOS().is_available()` | ✅ `True` |
-| 手动 `register_platforms()` | ✅ `PLATFORMS = ['flagos','cuda']` |
-| 导入顺序（torch_fl 先于 platforms） | ✅ 已用 `__import__` 钩子确认 |
-| 模块顶部 `sys.modules` 状态 | ✅ 两者均未加载 |
-| `numpy` 先于 torch_fl | ✅ 不影响 |
-| `sys.path[0]` 与真实路径一致 | ✅ 在 `flagscale/train/` 内跑也正常 |
-| torchrun vs 直跑 | ✅ 两种都失败（所以不是 torchrun） |
-| `-m` vs 文件路径 | ✅ 两种都失败 |
+| `torch_fl` 可导入 | ✅ 路径正确 |
+| `torch.flagos` 属性存在 | ✅ True |
+| 手动 `PlatformFlagOS().is_available()` | ✅ True |
+| 手动 `register_platforms()` | ✅ `['flagos','cuda']` |
+| 导入顺序 torch_fl → platforms | ✅ 用 `__import__` 钩子确认正确 |
+| 模块顶部 `sys.modules` | ✅ 两者均未加载 |
+| `numpy` 先于 torch_fl | ✅ 无影响 |
+| torchrun vs 直跑 | ✅ 都失败 |
+| `-m` vs 文件路径 | ✅ 都失败 |
+| `sys.path[0]` 一致 | ✅ 在 `flagscale/train/` 内跑也正常 |
+| 模块遮蔽文件 | ✅ 无 |
+| `device_count()` 唤醒 | ✅ 手动测 count=2，但真实运行里未被调用到 |
 
-**结论：失败只出现在 `train_retrieval.py` 这一个文件被真正执行时，
-任何等价的最小复现脚本都成功。根因尚未确定。**
+**为什么 reranker 与评测脚本不受影响**：
+- reranker 用 `device_type=cuda`，不走 flagos 分支；
+- `evaluate_retrieval.py --device flagos` **成功过**（推理吞吐实测有效），
+  因为它在平台判定之前就 `torch.cuda.set_device(...)` 了，
+  设备表那时已就绪。
 
-**下一步建议**（必须用二分法，不要再猜）：
-1. 在 `train_retrieval.py` 的 `init_distributed` 里把
-   `PlatformFlagOS().is_available()` 的**异常**打印出来（当前被
-   `except (AttributeError, RuntimeError): return False` 吞掉）。
-2. 在同一位置打印 `flagscale.platforms.platform_register.PLATFORMS` 的
-   `id()`，与模块级 `id()` 对比，确认是不是同一对象（可能是重复导入）。
-3. 用 `python -X importtime` 对比真实运行与 probe 的导入时间线。
+**下一步（必须用二分，不要再猜）**：
+1. 在 `train_retrieval.py` 的 `PLATFORMS` 检查点，直接调
+   `torch.flagos.device_count()` 并打印返回值——看真实运行里是 0 还是异常。
+2. 若为 0：说明该进程的 flagos 运行时确实没起来，查 `torch_fl._C` 的
+   初始化条件（它要 56 秒，可能依赖某个环境变量或设备句柄）。
+3. 若抛异常：把异常打出来（`PlatformFlagOS.is_available` 当前吞掉
+   `AttributeError/RuntimeError`，其余会穿透）。
+
+**当前进展（诚实记录）**：`init_distributed` 已加"平台为空时重注册 + 先探
+`device_count()`"的兜底（`40183dda`），**但实测仍未通过**——因为真实运行里
+`is_available()` 那一刻就是 False。这条兜底留着无害，但不是解法。
 
 **可用的替代路径**：`evaluate_retrieval.py --device flagos` 在 PPU 上**成功过**
 （2026-11-05 测推理吞吐：BGE 74.1、CLIP 270.9 样本/s）。它是 `python` 直跑、
