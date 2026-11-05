@@ -18,7 +18,14 @@ export FLAGSCALE_DISTRIBUTED_BACKEND=flagos FLAGSCALE_AUTOCAST_DEVICE=flagos
 export FLAGOS_USE_FLAGGEMS=false
 export GEMS_VENDOR=thead
 export NCCL_SOCKET_IFNAME=bond0
-export PYTHONPATH=/workspace/FlagScale
+# Torch-FL must be importable: `train.hardware.device_type=flagos` registers the
+# PrivateUse1 backend by importing torch_fl before torch, and without this path
+# the trainer dies with
+#   RuntimeError: device_type=flagos was requested, but a Torch-FL platform is
+#   unavailable. Import torch_fl before torch
+# The reranker route survived because it runs Megatron with device_type=cuda;
+# bge/clip use the flagos device and need this.
+export PYTHONPATH=/workspace/FlagScale:/workspace/Torch-FL
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 export PYTHONUNBUFFERED=1
 
