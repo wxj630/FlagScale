@@ -162,61 +162,56 @@ export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:${PY
 | torchrun 丢了环境变量 | 子进程内打印 → `FLAGSCALE_DEVICE='flagos'` | ❌ 环境在 |
 | runner 重写 PYTHONPATH | 生成的脚本第 14 行是 `...:${PYTHONPATH}`，保留了 | ❌ 没丢 |
 
-**已定位到精确现象，但根因仍未确定（2026-11-05，真实进程内插桩）**：
+### 3.3 ✅ 根因：容器只挂了 2 张卡，`CUDA_VISIBLE_DEVICES` 写错编号
+
+**这是一个纯粹的选卡错误，花了两小时才发现。** 记录在此避免重犯。
 
 ```
-PROBE7 is_available called; has torch.flagos = True
-PROBE7 -> is_available() = False          ← 真实运行
-PROBE3 PLATFORMS= [] torch.flagos= True
+$ docker inspect flagos-retrieval --format '{{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}'
+/dev/alixpu /dev/alixpu_ctl /dev/alixpu_ppu12 /dev/alixpu_ppu13
 ```
 
-同一台机器、同一环境、同样 `import torch_fl` 之后**手动**测：
+容器 `flagos-retrieval` **只映射了宿主的 ppu12 与 ppu13**，
+在容器内它们被重编号为 **0 和 1**。容器里不存在 2-15 号设备。
+
+实测（容器内）：
 
 ```
-before: True        ← is_available() 直接就是 True
-count: 2
-after: True
+python3 -c "import torch_fl, torch; print(torch.flagos.device_count())"
+2                                    # 只有两张
+
+CUDA_VISIBLE_DEVICES=0  -> device_count = 1, is_available = True
+CUDA_VISIBLE_DEVICES=1  -> device_count = 1, is_available = True
+CUDA_VISIBLE_DEVICES=2  -> （无输出，设备不存在）
+...
+CUDA_VISIBLE_DEVICES=15 -> （无输出）
 ```
 
-即 `PlatformFlagOS.is_available()`（= `torch.flagos.is_available()`
-= `_C._get_device_count() > 0`）在真实运行里返回 **False**、手动测返回 **True**。
-于是 `register_platforms()` 什么也没注册，`PLATFORMS` 为空，
-`get_platform()` 走到 `raise RuntimeError("No available platform detected")`。
+**失败链条**：我按 `ppu-smi` 挑了一张"空闲"的卡 15 → 容器里没有这个编号 →
+`torch.flagos.device_count()` 返回 **0** → `PlatformFlagOS.is_available()`
+返回 False → `register_platforms()` 一个平台都没注册 → `PLATFORMS` 为空 →
+`get_platform()` 抛 `No available platform detected` →
+被 `train_retrieval.py` 转译成
+`device_type=flagos was requested, but a Torch-FL platform is unavailable`。
 
-**已排除（全部实测，不要再重复）**：
+**这个错误信息完全误导**：它说 Torch-FL 装错了，实际只是卡号越界。
 
-| 验证项 | 结果 |
-|---|---|
-| `torch_fl` 可导入 | ✅ 路径正确 |
-| `torch.flagos` 属性存在 | ✅ True |
-| 手动 `PlatformFlagOS().is_available()` | ✅ True |
-| 手动 `register_platforms()` | ✅ `['flagos','cuda']` |
-| 导入顺序 torch_fl → platforms | ✅ 用 `__import__` 钩子确认正确 |
-| 模块顶部 `sys.modules` | ✅ 两者均未加载 |
-| `numpy` 先于 torch_fl | ✅ 无影响 |
-| torchrun vs 直跑 | ✅ 都失败 |
-| `-m` vs 文件路径 | ✅ 都失败 |
-| `sys.path[0]` 一致 | ✅ 在 `flagscale/train/` 内跑也正常 |
-| 模块遮蔽文件 | ✅ 无 |
-| `device_count()` 唤醒 | ✅ 手动测 count=2，但真实运行里未被调用到 |
+**教训**：
+1. **`ppu-smi` 显示的是宿主上的卡号，容器里要重新编号。**
+   先用 `docker inspect ... Devices` 看容器挂了哪几张，再在容器内用
+   `torch.flagos.device_count()` 确认。
+2. 容器的可用卡数 = `HostConfig.Devices` 里的 alixpu 数量，与宿主 16 张无关。
+3. 报 `Torch-FL platform is unavailable` 时，**先查设备数，别查 Python 环境**：
 
-**为什么 reranker 与评测脚本不受影响**：
-- reranker 用 `device_type=cuda`，不走 flagos 分支；
-- `evaluate_retrieval.py --device flagos` **成功过**（推理吞吐实测有效），
-  因为它在平台判定之前就 `torch.cuda.set_device(...)` 了，
-  设备表那时已就绪。
+   ```bash
+   docker exec flagos-retrieval python3 -c      "import torch_fl, torch; print(torch.flagos.device_count())"
+   ```
 
-**下一步（必须用二分，不要再猜）**：
-1. 在 `train_retrieval.py` 的 `PLATFORMS` 检查点，直接调
-   `torch.flagos.device_count()` 并打印返回值——看真实运行里是 0 还是异常。
-2. 若为 0：说明该进程的 flagos 运行时确实没起来，查 `torch_fl._C` 的
-   初始化条件（它要 56 秒，可能依赖某个环境变量或设备句柄）。
-3. 若抛异常：把异常打出来（`PlatformFlagOS.is_available` 当前吞掉
-   `AttributeError/RuntimeError`，其余会穿透）。
+   返回 0 就是选卡/挂载问题，不是依赖问题。
 
-**当前进展（诚实记录）**：`init_distributed` 已加"平台为空时重注册 + 先探
-`device_count()`"的兜底（`40183dda`），**但实测仍未通过**——因为真实运行里
-`is_available()` 那一刻就是 False。这条兜底留着无害，但不是解法。
+**当前阻塞**：ppu12/ppu13 两张卡都在跑 reranker（各 63 GB / 100%），
+容器只有这两张，所以 **CLIP 重训必须等 reranker 结束，或者新建一个挂了
+其它空闲卡的容器**。
 
 **可用的替代路径**：`evaluate_retrieval.py --device flagos` 在 PPU 上**成功过**
 （2026-11-05 测推理吞吐：BGE 74.1、CLIP 270.9 样本/s）。它是 `python` 直跑、
