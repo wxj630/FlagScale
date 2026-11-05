@@ -105,6 +105,10 @@ rm -rf qwen3_reranker/checkpoint-epoch-{1,2,3} qwen3_reranker/model.safetensors
 **要让 PPU 三模型都达到可复核，需要**：用同步后的代码重跑 reranker（存盘 bug 已修），
 以及重跑一次 CLIP 评测把 json 生成出来。
 
+> 💡 **推理吞吐另见 [14-inference-throughput.md](14-inference-throughput.md)。**
+> 本节是训练吞吐（含反向+优化器）；纯前向的推理吞吐在同平台上是它的 2-4 倍，
+> 不要混用。
+
 ## 零、A100 对照总表（验收口径）
 
 所有指标都以 A100 为基准。**精度**用同一 checkpoint、同一数据、同一代码的
