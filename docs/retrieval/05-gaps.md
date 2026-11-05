@@ -103,23 +103,29 @@ T²-Ranking 是三篇论文的**训练**数据之一（M3 表 8 里中文监督 
 **两者难度差两个数量级**，所以小候选池上的 R@1 天然偏高、涨幅天然偏小
 （天花板效应）。
 
-## 差异 3：指标（已修复一部分）
+## 差异 3：指标（计算已具备，汇报口径已纠正）
 
-| 论文主指标 | 我们原来报的 | 现在报的 |
-|---|---|---|
-| **nDCG@10**（M3 的 MIRACL/MLDR/NarrativeQA；Qwen3 全部 6 个基准） | ❌ **没有** | ✅ **已加** |
-| Recall@100（M3 的 MKQA） | ❌ | ⚠️ 16 候选池下 recall@20 = recall@16，无法到 100 |
-| Recall@20 / nDCG@20（LightGCN 类基线口径） | ❌ | ✅ **已加** |
-| R@1/5/10（CLIP） | ✅ | ✅ 不变（与论文表 13 一致） |
-| MRR / mean rank | ✅ | ✅ 保留 |
+**评测代码算得出来的指标多于论文要求**，这本身不是问题。问题在**汇报方式**
+——早期把 R@k + MRR + nDCG@k 一整套塞进同一张表，连 CLIP 也报了 nDCG，
+而 CLIP 论文根本没有这个指标。2026-11-05 起改为**按各自论文口径汇报**。
 
-### 已做的修改（2026-10-29）
+| 模型 | 论文主指标 | 算得出？ | 正文报？ |
+|---|---|---|---|
+| BGE-M3 | **nDCG@10**（MIRACL/MLDR/NarrativeQA）<br>Recall@100（MKQA） | ✅ nDCG@10<br>⚠️ Recall@100 做不到（候选池只有 16） | ✅ 只报 nDCG@10 |
+| Qwen3-Reranker | **nDCG@10**（6 个基准） | ⚠️ 指标能算，但**协议不对**（16 候选 vs 论文 top-100） | ❌ 报不出，只列健全性检查 |
+| CLIP | **R@1 / R@5 / R@10**（双向），**无 nDCG** | ✅ 全部 | ✅ 只报 R@1/5/10 |
 
-`examples/retrieval/evaluate_retrieval.py` 的 `rank_metrics()` 现在同时输出：
+其余指标（nDCG@1/5/20、R@20、MRR、mean rank）照样算，但折进各文档的
+「完整指标（非论文口径，仅备查）」——**不占正文版面，避免读者误以为
+它们是论文指标**。
+
+### 计算实现（2026-10-29）
+
+`examples/retrieval/evaluate_retrieval.py` 的 `rank_metrics()` 输出：
 
 ```python
 recall@{1,5,10,20}   # 命中率
-ndcg@{1,5,10,20}     # 论文主指标
+ndcg@{1,5,10,20}     # 论文主指标（BGE / Qwen3）
 hit@{1,5,10,20}      # = recall@k，供基线按 HR@k 口径对比
 mrr / mean_rank
 ```
@@ -133,15 +139,16 @@ nDCG 实现说明：本任务每个 query 只有 1 个相关文档（ground trut
 | 缺口 | 影响 | 补法 |
 |---|---|---|
 | **Recall@100 / MAP** | M3 的 MKQA 主指标是 Recall@100，16 候选池做不到 | 需全语料检索（改评测协议，不只是加指标） |
+| **Reranker 的 top-100 协议** | 论文的 nDCG@10 建立在 embedding 检索出的 100 候选上 | 先用 Qwen3-Embedding-0.6B 检索，再重排 |
 | **11-point mAP** | CLIP 的 Pascal VOC 用这个 | 我们不做分类任务，不需要 |
 | **mean per class** | CLIP 的 FGVC Aircraft / Oxford Pets / Flowers/Caltech 用这个 | 同上，分类任务才需要 |
 | **ROC AUC** | CLIP 的 Hateful Memes | 同上 |
 | **mean(top1, top5)** | CLIP 的 Kinetics700 | 同上 |
 | **MTEB 的任务类型均值**（Mean(Task) vs Mean(Type)） | Qwen3-Embedding 主表口径 | 需跑完整 MMTEB，用 `mteb` 库自带聚合 |
 
-**结论**：文本三模型的指标**已经能覆盖论文主指标**（nDCG@k 是核心，已补）。
-真正的缺口不是指标，而是**候选池**（16 vs 全语料 / top-100），
-那个改起来比加指标大得多。
+**结论**：指标本身不再是缺口——nDCG@k 与 R@k 都能算。
+真正的缺口是**候选池与评测协议**：BGE 的 MKQA 要全语料、Reranker 要
+top-100 候选。那个改起来比加指标大得多。
 
 ## 差异 4：CLIP 的两个细节
 
