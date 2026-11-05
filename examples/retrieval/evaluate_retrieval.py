@@ -296,7 +296,10 @@ def _clip_embeddings(model, chunk: list[dict], device) -> tuple[torch.Tensor, to
 
 
 @torch.no_grad()
-def evaluate_in_batch(model, rows: list[dict], device, batch_size: int, ks: tuple[int, ...], task: str = ""):
+def evaluate_in_batch(
+    model, rows: list[dict], device, batch_size: int, ks: tuple[int, ...],
+    task: str = "", clock: "InferenceClock | None" = None,
+):
     """Symmetric image/text retrieval over the **whole** evaluation set.
 
     The name is historical: an earlier version scored each batch in isolation,
@@ -372,13 +375,14 @@ def evaluate_in_batch_streaming(
         chunk = list(itertools.islice(stream, batch_size))
         if not chunk:
             break
+        call = clock if clock is not None else (lambda fn, *a, **k: fn(*a, **k))
         if task == "clip":
-            text_emb, image_emb = _clip_embeddings(model, chunk, device)
+            text_emb, image_emb = call(_clip_embeddings, model, chunk, device)
         else:
             text_inputs = [{"text": row["text"]} for row in chunk]
             image_inputs = [{"image": row["image"]} for row in chunk]
-            text_emb = embedding_batch(model, text_inputs, device)
-            image_emb = embedding_batch(model, image_inputs, device)
+            text_emb = call(embedding_batch, model, text_inputs, device)
+            image_emb = call(embedding_batch, model, image_inputs, device)
         text_embeddings.append(text_emb.float().cpu())
         image_embeddings.append(image_emb.float().cpu())
         count += len(chunk)
