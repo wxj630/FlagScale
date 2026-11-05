@@ -38,9 +38,25 @@ experiment:
     # stored in this repository or in the generated Hydra config.
     WANDB_MODE: online
   cmds:
-    # This is overridden to the Torch-FL environment by the CUDA launch script.
+    # Overridden to the Torch-FL environment by each launch script.
+    #
+    # Two things this has to survive:
+    #  * PPU containers have no venv -- /usr/local/bin/activate does not exist,
+    #    so a bare `source` aborts the generated script before the trainer runs;
+    #  * `device_type=flagos` needs the vendor Torch-FL tree importable, because
+    #    the runner rewrites PYTHONPATH from scratch in this same script and the
+    #    backend must be imported before torch.
+    # Without the second, bge/clip die with "device_type=flagos was requested,
+    # but a Torch-FL platform is unavailable" (the reranker route uses
+    # device_type=cuda and never noticed).
+    #
+    # The Torch-FL path differs per platform (/workspace/Torch-FL on PPU,
+    # /flagos-search-codes on A100, /data2/jiangxuhui on Kunlunxin), so it is
+    # added only when the directory exists -- on a native CUDA box neither
+    # candidate matches and PYTHONPATH is left alone.
     before_start: >-
-      source ${oc.env:FLAGSCALE_PYTHON_ENV,/flagos-search-codes/torch-fl-cuda/.venv}/bin/activate
+      { source ${oc.env:FLAGSCALE_PYTHON_ENV,/flagos-search-codes/torch-fl-cuda/.venv}/bin/activate; } 2>/dev/null || true;
+      for d in "${oc.env:FLAGSCALE_VENDOR_ROOT,/workspace/Torch-FL}" "$PWD/../Torch-FL" "$HOME/flagos-retrieval/Torch-FL"; do if [ -d "$d" ]; then export PYTHONPATH="$d:$PYTHONPATH"; fi; done
 
 action: run
 
