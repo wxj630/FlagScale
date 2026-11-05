@@ -1,0 +1,43 @@
+{
+  "model_type": "clip_vit_large",
+  "task": "clip",
+  "checkpoint": "/workspace/checkpoints/ppu-fp32master-3epoch/clip_vit_large",
+  "split": "all",
+  "samples": 5000,
+  "inference": {
+    "items_scored": 10000,
+    "model_seconds": 30.783,
+    "samples_per_s": 324.85,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "text_to_image": {
+      "count": 5000,
+      "recall@1": 0.7378,
+      "recall@5": 0.916,
+      "recall@10": 0.9564,
+      "mrr": 0.8166522107357842,
+      "mean_rank": 2.6008,
+      "ndcg@1": 0.7378,
+      "ndcg@5": 0.8357537610517686,
+      "ndcg@10": 0.8490077813425825,
+      "hit@1": 0.7378,
+      "hit@5": 0.916,
+      "hit@10": 0.9564
+    },
+    "image_to_text": {
+      "count": 5000,
+      "recall@1": 0.7768,
+      "recall@5": 0.9402,
+      "recall@10": 0.971,
+      "mrr": 0.8484526520348683,
+      "mean_rank": 2.1448,
+      "ndcg@1": 0.7768,
+      "ndcg@5": 0.8672063913952206,
+      "ndcg@10": 0.8772883962194677,
+      "hit@1": 0.7768,
+      "hit@5": 0.9402,
+      "hit@10": 0.971
+    }
+  }
+}

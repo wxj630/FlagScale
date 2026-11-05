@@ -90,34 +90,42 @@ rm -rf qwen3_reranker/checkpoint-epoch-{1,2,3} qwen3_reranker/model.safetensors
 **注意 trained 的 R@1 比 base 低 4.4 点**，R@5 高 0.8 点——和 A100/昆仑芯
 同一个模式。这不能算"精度达标"，只是 base 与 trained 高度接近。
 
-### CLIP：数字在，但**权重和产物都丢了**
+### CLIP：已重训并复核 ✅（2026-11-05 补完）
 
-从 `ppu-clip-eval.log`：
+**结论：之前丢失的权重与产物已重新生成，数字与此前记录完全一致。**
 
-| 方向 | base R@1 | trained R@1 |
-|---|---|---|
-| text → image | 0.5452 | **0.7378** |
-| image → text | 0.6222 | **0.7768** |
+| 方向 | base R@1 | trained R@1 | Δ | A100 trained |
+|---|---|---|---|---|
+| text → image | 0.5452 | **0.7378** | **+19.26 pt** | 0.7400（差 0.22） |
+| image → text | 0.6222 | **0.7768** | **+15.46 pt** | 0.7784（差 0.16） |
 
-与 A100（0.7400 / 0.7784）分别差 0.2 / 0.2 个百分点，**说明 CLIP 训练本身是有效的**。
+完整指标见 `docs/retrieval/data/ppu_clip_base.json` 与
+`docs/retrieval/data/ppu_clip_trained.json`（各 5,000 图文对，双向）。
 
-**但这两行数字现在不可复核，而且情况比"产物丢了"更严重**（2026-11-05 核实）：
+**重训实测**（2026-11-05 20:52 → 22:13，卡 ppu15）：
 
-| 东西 | 状态 |
+| 项 | 值 |
 |---|---|
-| 评测 `json` / `predictions` | ❌ 不在盘上 |
-| **trained 权重本身** | ❌ **不在盘上**（`ppu-fp32master-3epoch/` 下只有 `qwen3_reranker`，没有 `clip_vit_large`） |
-| 原始预训练权重 | ✅ `/workspace/models/clip-vit-large-patch14` |
+| 耗时 | 4,729.7 s = **1.31 h**（3 epoch，830 步/epoch） |
+| train_loss | ep1 0.1190 → ep2 0.0792 → ep3 **0.0708** |
+| validation_loss | ep1 0.0919 → ep2 0.0789 → ep3 0.0770 |
+| test_loss | **0.0701** |
+| 权重校验 | 590 张量，`backbone.` 前缀 **0**，秩分布 `{0:1, 1:123, 2:75, 4:1}` ✅ |
+| 存盘 | `checkpoint-epoch-{1,2,3}` + `model.safetensors`，各 1.6 GB |
 
-即：**要重算 nDCG 不只是重跑评测，得先重训 CLIP**（约 0.74 h，代价可接受）。
+> **此前的状态（历史记录，保留以说明为什么重训）**：
+> 2026-11-05 14:00 左右核实，`ppu-fp32master-3epoch/` 下**只有 `qwen3_reranker`**，
+> 没有 `clip_vit_large` —— 10-26 那次训练在第一个 epoch 就被 `Killed`
+> （日志结尾 `37594 Killed`，0 条 `train_loss=`），**从未触发过存盘**。
+> 因此当时表里的 0.7378 / 0.7768 虽然后来被证明是对的，但**当时无产物可复核**。
+>
+> 现在的数字来自这次重训，**可逐项追溯**到上面的 JSON。
 
-> ⚠️ 2026-11-05 测推理吞吐时跑的是 **base 权重**
-> （`docs/retrieval/data/inference/ppu_clip.json`，R@1 0.5452 / 0.6222）。
-> 那份 JSON **不能**用来补 trained 指标——这恰好印证 trained 权重确实不存在：
-> 若权重还在，评测脚本会直接加载它。
-
-**要让 PPU 三模型都达到可复核，需要**：重训 CLIP（0.74 h）并重跑评测；
-用同步后的代码重跑 reranker（存盘 bug 已修）。
+**踩到的坑**（重训/评测时）：
+1. `/flagos-retrieval-ckpts` 在新容器里不是软链，训练写进了容器内临时目录，
+   需手动 `cp` 到 `/workspace/checkpoints`（挂载盘）。
+2. 只拷 `model.safetensors` 不够——评测还需 `preprocessor_config.json`，
+   否则报 `OSError: Can't load image processor`。
 
 > 💡 **推理吞吐另见 [14-inference-throughput.md](14-inference-throughput.md)。**
 > 本节是训练吞吐（含反向+优化器）；纯前向的推理吞吐在同平台上是它的 2-4 倍，

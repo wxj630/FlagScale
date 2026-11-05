@@ -1,0 +1,43 @@
+{
+  "model_type": "clip_vit_large",
+  "task": "clip",
+  "checkpoint": "/flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14",
+  "split": "all",
+  "samples": 5000,
+  "inference": {
+    "items_scored": 10000,
+    "model_seconds": 33.669,
+    "samples_per_s": 297.009,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "text_to_image": {
+      "count": 5000,
+      "recall@1": 0.5452,
+      "recall@5": 0.7794,
+      "recall@10": 0.8556,
+      "mrr": 0.6529259158201922,
+      "mean_rank": 6.4838,
+      "ndcg@1": 0.5452,
+      "ndcg@5": 0.6719021378387003,
+      "ndcg@10": 0.6964934598815834,
+      "hit@1": 0.5452,
+      "hit@5": 0.7794,
+      "hit@10": 0.8556
+    },
+    "image_to_text": {
+      "count": 5000,
+      "recall@1": 0.6222,
+      "recall@5": 0.8466,
+      "recall@10": 0.9094,
+      "mrr": 0.7218521384056024,
+      "mean_rank": 4.5714,
+      "ndcg@1": 0.6222,
+      "ndcg@5": 0.7436039134256308,
+      "ndcg@10": 0.7639871879869943,
+      "hit@1": 0.6222,
+      "hit@5": 0.8466,
+      "hit@10": 0.9094
+    }
+  }
+}
