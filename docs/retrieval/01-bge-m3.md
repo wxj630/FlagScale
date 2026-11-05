@@ -42,10 +42,22 @@
 
 | 任务 | 数据集 | 主指标 | 辅助指标 | 规模 / 语言 |
 |---|---|---|---|---|
-| 多语检索 | **MIRACL dev** | **nDCG@10** | Recall@100 | 18 语言，同语言 query-passage |
-| 跨语检索 | **MKQA** | **Recall@100** | Recall@20 | 25 非英语 query → 英文 Wikipedia（BEIR 处理版） |
+| 多语检索 | **MIRACL dev** | **nDCG@10** | **Recall@100**（附录） | 18 语言，同语言 query-passage |
+| 跨语检索 | **MKQA** | **Recall@100** | **Recall@20**（附录） | 25 非英语 query → 英文 Wikipedia（BEIR 处理版） |
 | 长文检索 | **MLDR** test | **nDCG@10** | — | 12 语言；corpus 493,709 篇，test query 3,800 |
 | 长文检索 | **NarrativeQA** | **nDCG@10** | — | 仅英文 |
+
+**原文逐字**（`Papers/M3-Embedding/main.tex`）：
+
+- MIRACL（`:434`）：*"we use **nDCG@10** as the primary evaluation metric
+  (**Recall@100 is also measured and reported** in Appendix)"*
+- MKQA（`:559`）：*"we report **Recall@100** as the primary metric
+  (**Recall@20 is reported as an auxiliary metric** in the Appendix)"*
+- MLDR（`:551`）与 NarrativeQA（`:613`）的表题写明 *"(measured by nDCG@10)"*
+
+> ⚠️ **BGE-M3 的主指标是两项，不是只有 nDCG@10**：检索质量看 **nDCG@10**
+> （MIRACL / MLDR / NarrativeQA），跨语召回看 **Recall@100**（MKQA）。
+> 附录另有 MIRACL 的 Recall@100（`:1033`）与 MKQA 的 Recall@20（`:1083`）两张表。
 
 **MIRACL 的 18 语言**（论文表 7 的列）：
 ar、bn、en、es、fa、fi、fr、hi、id、ja、ko、ru、sw、te、th、zh、de、yo。

@@ -26,16 +26,28 @@ SimCLUE, MIRACL, MLDR, Mr.TyDi, Multi-CPR, CodeSearchNet .etc
 
 ## 评测集与指标
 
-**6 个基准，统一 nDCG@10**：
+**6 个基准**：
 
-| 基准 | 类别 | 内容 |
-|---|---|---|
-| MTEB-R | 英文 | MTEB (eng, v2) 的检索子集 |
-| CMTEB-R | 中文 | MTEB (cmn, v1) 的检索子集 |
-| MMTEB-R | 多语 | MMTEB 的检索子集 |
-| MLDR | 长文 | 多语长文档检索 |
-| MTEB-Code | 代码 | 纯代码检索 |
-| FollowIR | 复杂指令 | 带指令的检索 |
+| 基准 | 类别 | 内容 | 指标（论文是否明示） |
+|---|---|---|---|
+| MTEB-R | 英文 | MTEB (eng, v2) 的检索子集 | nDCG@10 —— ⚠️ 论文未明示，按 MTEB 惯例 |
+| CMTEB-R | 中文 | MTEB (cmn, v1) 的检索子集 | nDCG@10 —— ⚠️ 同上 |
+| MMTEB-R | 多语 | MMTEB 的检索子集 | nDCG@10 —— ⚠️ 同上 |
+| MLDR | 长文 | 多语长文档检索 | nDCG@10 —— ⚠️ 同上 |
+| MTEB-Code | 代码 | 纯代码检索 | **nDCG@10 —— ✅ 论文明示**（`tables/mteb_code.tex:42`） |
+| FollowIR | 复杂指令 | 带指令的检索 | **p-MRR —— ⚠️ 论文未明示**（FollowIR 的标准指标是 p-MRR，不是 nDCG） |
+
+> ⚠️ **必须说清：论文正文没有逐项声明这六列用什么指标。** `tables/rerank_all.tex`
+> 的 caption 只写了 *"All scores are our runs based on the retrieval top-100
+> results from the first row."*；正文 `contents/evaluation.tex:31` 也只交代了
+> top-100 候选协议。整个源文件里唯一明写指标的是 MTEB-Code 那一句
+> *"We report nDCG@10 scores."*
+>
+> 所以前四列按 **MTEB 系列惯例推断为 nDCG@10**，FollowIR 按该基准惯例推断为
+> **p-MRR**——这两条都是**推断，不是原文**。汇报时要标出来，不能当成论文声明。
+> 早前文档写"6 个基准统一 nDCG@10"，其中 FollowIR 一项基本可以确定是错的
+> （它的数值 8.05 / 14.84 这种量级与 p-MRR 的量纲吻合，与 nDCG 的 0-100
+> 或 0-1 都不搭）。
 
 ## 关键：候选来源
 
