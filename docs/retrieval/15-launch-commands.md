@@ -209,9 +209,59 @@ CUDA_VISIBLE_DEVICES=15 -> （无输出）
 
    返回 0 就是选卡/挂载问题，不是依赖问题。
 
-**当前阻塞**：ppu12/ppu13 两张卡都在跑 reranker（各 63 GB / 100%），
-容器只有这两张，所以 **CLIP 重训必须等 reranker 结束，或者新建一个挂了
-其它空闲卡的容器**。
+### 3.4 新建一个挂其它卡的容器（已跑通）
+
+`flagos-retrieval` 那两张卡被 reranker 占满时，**不要等**——直接建一个挂空闲卡的容器。
+2026-11-05 用 ppu15 建 `flagos-retrieval-clip`，CLIP 训练已正常启动。
+
+```bash
+# 1. 先看宿主哪张卡真空闲（26 MiB / 0% 才算）
+ppu-smi | awk '/^\| +[0-9]+ +PPU/{i=$2} /MiB \/ 98304MiB/{print i, $0}'
+
+# 2. 用现有容器的配置作模板
+docker inspect flagos-retrieval --format \
+  'IMAGE={{.Config.Image}} BINDS={{range .HostConfig.Binds}}{{.}} {{end}} DEVS={{range .HostConfig.Devices}}{{.PathOnHost}} {{end}}'
+
+# 3. 建新容器（entrypoint 用 bash -c 包一层，否则报 permission denied）
+docker run -d --name flagos-retrieval-clip \
+  --network host --shm-size 32g \
+  --device /dev/alixpu --device /dev/alixpu_ctl --device /dev/alixpu_ppu15 \
+  -v /bmcp_lvm_fs/jiangxuhui:/workspace -v /etc/localtime:/etc/localtime:ro \
+  flagtree-ppu-py312-torch2.10.0-sdk2.1.0-cu130-ubuntu24.04:202607-3.6-base \
+  bash -c "bash /opt/t-head/entrypoint.sh; sleep infinity"
+```
+
+**新容器必须补两样东西**，否则训练起不来：
+
+```bash
+# (a) 标准路径软链——新容器没有 setup 脚本建的链
+docker exec flagos-retrieval-clip bash -c '
+  ln -sfn /workspace/models  /flagos-retrieval-models
+  ln -sfn /workspace/data    /flagos-retrieval-datasets
+  mkdir -p /flagos-retrieval-ckpts && ln -sfn /workspace/checkpoints /flagos-retrieval-ckpts/store
+  for m in bge-m3 clip-vit-large-patch14 Qwen3-Reranker-8B; do
+    [ -d /workspace/models/$m ] && ln -sfn /workspace/models/$m /workspace/models/$m/$m; done
+  for d in t2ranking wds_mscoco_captions2017; do
+    [ -d /workspace/data/$d ] && ln -sfn /workspace/data/$d /workspace/data/$d/$d; done'
+
+# (b) 确认新挂的卡在里面可见（容器内重新编号为 0）
+docker exec flagos-retrieval-clip python3 -c \
+  "import torch_fl, torch; print(torch.flagos.device_count())"   # 期望 1
+```
+
+**踩到的坑**：
+
+| 报错 | 原因 | 修法 |
+|---|---|---|
+| `Conflict. The container name is already in use` | 有同名旧容器 | `docker rename ...-old` 或 `docker rm` |
+| `exec: "bash /opt/t-head/entrypoint.sh": no such file` | `--entrypoint` 不能带参数 | 用 `--entrypoint /opt/t-head/entrypoint.sh`，或整段放进 `--entrypoint` 之外 |
+| `/opt/t-head/entrypoint.sh: permission denied` | 脚本无执行位 | `bash -c "bash /opt/t-head/entrypoint.sh; sleep infinity"` |
+| `HFValidationError: Repo id must be ...` | `/flagos-retrieval-models` 软链不存在 | 执行上面的 (a) |
+
+**当前状态（2026-11-05 20:5x）**：
+- `flagos-retrieval-clip`（ppu15）：CLIP 训练中，step 30+，loss 0.191→0.169
+- `flagos-retrieval`（ppu12/13）：reranker 训练中
+- 旧容器 `flagos-retrieval-clip-old`（ppu7）保留未删
 
 **可用的替代路径**：`evaluate_retrieval.py --device flagos` 在 PPU 上**成功过**
 （2026-11-05 测推理吞吐：BGE 74.1、CLIP 270.9 样本/s）。它是 `python` 直跑、
