@@ -112,6 +112,30 @@ def init_distributed(
             platform = get_platform()
         except (RuntimeError, ValueError):
             platform = None
+        # `register_platforms()` runs once, when `flagscale.platforms` is first
+        # imported.  On PPU that import happens before Torch-FL has finished
+        # initialising: measured there, `torch.flagos` already existed but
+        # `torch.flagos.is_available()` still returned False -- it is
+        # `_C._get_device_count() > 0`, and the device table is empty until the
+        # runtime is touched.  So no platform got registered and every later
+        # `get_platform()` raised "No available platform detected".
+        #
+        # Touching the device count forces that initialisation, then
+        # re-registering picks the platform up.  Both steps are guarded: on a
+        # working backend the first `get_platform()` already succeeded and this
+        # block never runs.
+        if platform is None and requested in {"privateuseone", "flagos"}:
+            try:
+                import torch as _torch
+
+                if hasattr(_torch, "flagos"):
+                    _torch.flagos.device_count()
+                from flagscale.platforms.platform_register import register_platforms
+
+                register_platforms()
+                platform = get_platform()
+            except (ImportError, RuntimeError, ValueError):
+                platform = None
 
     if requested in {"privateuseone", "flagos"}:
         if platform is None or platform.name() != "flagos":
