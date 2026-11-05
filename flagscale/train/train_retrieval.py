@@ -1028,12 +1028,18 @@ def save_megatron_stage(trainer: Any, target: Path, **_legacy: Any) -> None:
     destination = target / f"stage{trainer.pp_rank}.pt"
     torch.save(state, destination)
     # max() over an empty generator raises, and on the last rank every entry but
-    # the final norm can be lazy/None, leaving state empty.  `isinstance` rather
-    # than a bare generator: stage_state already filters to tensors, but this
-    # line runs after the file is written, so a surprise entry here would turn a
-    # successful save into a failed epoch.
+    # the final norm can be lazy/None, leaving state empty.  Two separate traps:
+    # a non-Tensor entry has no .abs(), and an *empty* tensor raises
+    # "Expected reduction dim to be specified for input.numel() == 0" from
+    # inside .max() -- pipeline stage 1 hit exactly that, and because this line
+    # runs after the file is written, a completed save still became a failed
+    # epoch.
     peak = max(
-        (float(t.abs().max()) for t in state.values() if isinstance(t, torch.Tensor)),
+        (
+            float(t.abs().max())
+            for t in state.values()
+            if isinstance(t, torch.Tensor) and t.numel() > 0
+        ),
         default=float("nan"),
     )
     log(f"saved {destination} ({len(state)} tensors, max|w|={peak:.3f})")

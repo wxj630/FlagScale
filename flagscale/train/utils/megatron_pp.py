@@ -903,6 +903,12 @@ class MegatronPipelineTrainer:
             if not isinstance(tensor, torch.Tensor):
                 continue
             value = tensor.detach().to("cpu", dtype=dtype)
+            if value.numel() == 0:
+                # Pipeline stage 1 carries empty placeholders. They are legal to
+                # save but `.abs().max()` has no reduction to take, so the
+                # finite check cannot run on one.
+                state[name] = value
+                continue
             if not torch.isfinite(value).all():
                 raise RuntimeError(
                     f"refusing to save non-finite tensor {name!r} "
