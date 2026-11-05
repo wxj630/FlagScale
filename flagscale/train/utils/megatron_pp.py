@@ -800,8 +800,39 @@ class MegatronPipelineTrainer:
                     for key in sorted(k for k in batch if k.startswith("negative")):
                         chunk.append([anchor, batch[key][index]])
 
-                microbatches = max(1, len(chunk) // self.pairs_per_microbatch)
-                stream = iter([chunk])
+                # Hand the schedule one micro-batch's worth of pairs per call.
+                #
+                # It used to be `stream = iter([chunk])`: a single item holding
+                # the whole chunk, while `num_microbatches` said 4 and
+                # `micro_batch_size` said 2.  The schedule shaped its p2p
+                # tensors for 2 rows, but `_forward_step` encoded all 8 pairs,
+                # so `_score_processor` saw hidden_states=(640, 2, 4096) with
+                # lengths.length=8 and raised "hidden batch 2 != len(lengths)=8".
+                # On P800 that fired at the end of epoch 1 (step 9,585) and,
+                # because the epoch's checkpoint is written after evaluation,
+                # discarded 16 hours of training.
+                #
+                # Training never hit it because `_RowStream` already yields
+                # exactly `pairs_per_microbatch` pairs per `next()`.
+                step = max(1, int(self.pairs_per_microbatch))
+                microbatches = max(1, len(chunk) // step)
+                usable = microbatches * step
+                if usable != len(chunk):
+                    # A short final micro-batch cannot ride the schedule: the
+                    # p2p tensors are shaped from micro_batch_size, so a chunk
+                    # with fewer rows mismatches the buffer every other stage
+                    # expects.  Drop the remainder rather than crash mid-run;
+                    # keep eval rows a multiple of `step` to avoid it.
+                    self.log(
+                        f"evaluate: dropping {len(chunk) - usable} trailing "
+                        f"pair(s); {len(chunk)} is not a multiple of "
+                        f"{step} pairs/micro-batch"
+                    )
+                micro_chunks = [
+                    chunk[index * step : (index + 1) * step]
+                    for index in range(microbatches)
+                ]
+                stream = iter(micro_chunks)
                 with torch.no_grad():
                     outputs = schedule(
                         forward_step_func=partial(

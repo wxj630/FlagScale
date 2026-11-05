@@ -905,6 +905,20 @@ def _train_megatron(
     for epoch in range(1, epochs + 1):
         stats = trainer.train_epoch(train_loader, epoch, epochs, steps_per_epoch)
         train_loss = stats["loss"]
+
+        # Save the epoch BEFORE evaluating it.
+        #
+        # Evaluation goes through the pipeline schedule and can raise (on P800
+        # it did: `hidden batch 2 != len(lengths)=8` at step 9,585 of epoch 1).
+        # With the save after the eval, that exception threw away the entire
+        # epoch's weights -- 16 hours of training -- even though the weights
+        # themselves were fine.  The cost of saving first is one extra snapshot
+        # write; the cost of saving last is the whole run.
+        if save_every_epoch:
+            epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
+            save_megatron_stage(trainer, epoch_dir, tensorboard=torch)
+            log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
+
         validation = trainer.evaluate(validation_loader)
         validation_loss = validation["loss"]
         log(
@@ -931,13 +945,8 @@ def _train_megatron(
             )
 
         if save_every_epoch:
-            # Same directory layout as the DDP/FSDP2 path, so every platform's
-            # run can be resumed and evaluated by the same tooling.  A
-            # single overwritten file is what lost the best P800 weights once.
-            epoch_dir = output_dir / f"checkpoint-epoch-{epoch}"
-            save_megatron_stage(trainer, epoch_dir, tensorboard=torch)
-            log(f"saved epoch {epoch} checkpoint to {epoch_dir}")
-
+            # `checkpoint-best` still needs the validation number, so it stays
+            # here; the per-epoch snapshot was already written above.
             if validation_loss == validation_loss and validation_loss < best_eval:
                 best_eval = validation_loss
                 save_megatron_stage(trainer, output_dir / "checkpoint-best", tensorboard=torch)
