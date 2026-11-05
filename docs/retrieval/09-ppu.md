@@ -90,7 +90,7 @@ rm -rf qwen3_reranker/checkpoint-epoch-{1,2,3} qwen3_reranker/model.safetensors
 **注意 trained 的 R@1 比 base 低 4.4 点**，R@5 高 0.8 点——和 A100/昆仑芯
 同一个模式。这不能算"精度达标"，只是 base 与 trained 高度接近。
 
-### CLIP：数字在，但产物丢了
+### CLIP：数字在，但**权重和产物都丢了**
 
 从 `ppu-clip-eval.log`：
 
@@ -99,11 +99,25 @@ rm -rf qwen3_reranker/checkpoint-epoch-{1,2,3} qwen3_reranker/model.safetensors
 | text → image | 0.5452 | **0.7378** |
 | image → text | 0.6222 | **0.7768** |
 
-与 A100（0.7400 / 0.7784）分别差 0.2 / 0.2 个百分点，**说明 CLIP 训练本身是有效的**，
-只是这次的 json/predictions 已不在磁盘上，无法按本文档的统一口径重算 nDCG。
+与 A100（0.7400 / 0.7784）分别差 0.2 / 0.2 个百分点，**说明 CLIP 训练本身是有效的**。
 
-**要让 PPU 三模型都达到可复核，需要**：用同步后的代码重跑 reranker（存盘 bug 已修），
-以及重跑一次 CLIP 评测把 json 生成出来。
+**但这两行数字现在不可复核，而且情况比"产物丢了"更严重**（2026-11-05 核实）：
+
+| 东西 | 状态 |
+|---|---|
+| 评测 `json` / `predictions` | ❌ 不在盘上 |
+| **trained 权重本身** | ❌ **不在盘上**（`ppu-fp32master-3epoch/` 下只有 `qwen3_reranker`，没有 `clip_vit_large`） |
+| 原始预训练权重 | ✅ `/workspace/models/clip-vit-large-patch14` |
+
+即：**要重算 nDCG 不只是重跑评测，得先重训 CLIP**（约 0.74 h，代价可接受）。
+
+> ⚠️ 2026-11-05 测推理吞吐时跑的是 **base 权重**
+> （`docs/retrieval/data/inference/ppu_clip.json`，R@1 0.5452 / 0.6222）。
+> 那份 JSON **不能**用来补 trained 指标——这恰好印证 trained 权重确实不存在：
+> 若权重还在，评测脚本会直接加载它。
+
+**要让 PPU 三模型都达到可复核，需要**：重训 CLIP（0.74 h）并重跑评测；
+用同步后的代码重跑 reranker（存盘 bug 已修）。
 
 > 💡 **推理吞吐另见 [14-inference-throughput.md](14-inference-throughput.md)。**
 > 本节是训练吞吐（含反向+优化器）；纯前向的推理吞吐在同平台上是它的 2-4 倍，
