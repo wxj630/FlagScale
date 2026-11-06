@@ -37,6 +37,12 @@
 > 门槛 = A100 × 1.050 × 0.8：
 > BGE 99.12 样本/s，CLIP 99.96 样本/s。
 
+> ⚠️ **本节判定用的是我们实测的系数。** 验收方另有一套（其 BF16/FP32 倍数换算），
+> 用它算的达成率更低。**两套都必须报**，对照表见
+> [14-inference-throughput.md](14-inference-throughput.md) §二·五 与
+> [10-microbench-discount.md](10-microbench-discount.md) §一·六。
+
+
 **一句话**：CLIP 精度与 A100 几乎一致，吞吐只差 5%；BGE 精度也一致（trained nDCG
 99.7%），但吞吐只有 A100 的 46.8%，主要不是 GEMM——昇腾的 bf16 GEMM 比 A100 快，
 差距在 **RMSNorm / LayerNorm / GELU / softmax / 逐元素 / 小算子**。
