@@ -416,6 +416,53 @@ refer to a function template ... 1 error generated when compiling for xpu3.
 > 遇到"厂商算子 JIT 崩"这类问题，**先查历史记录再动手试**。
 
 
+## 四·五、⚠️ reranker 在 P800 上学不动：排查记录（2026-11-07，**未解决**）
+
+**现象**：seq=640 的 3 epoch run 在第 5,810 步崩成 `loss=0.0000`，
+`grad_norm` 恒为 1.000（撞 clip 阈值），epoch 1 的 `validation_loss=20.87`。
+停掉前已空转约 6,000 步（17 小时）。
+
+### 最硬的证据：模型没有在学习
+
+用 2,048 行的小数据集、**关掉 shuffle**、重复跑 2 个 epoch（同样的数据看第二遍）：
+
+| epoch | train_loss | val_loss |
+|---|---|---|
+| 1 | 0.4903 | 0.4580 |
+| 2 | **0.4875** | 0.4551 |
+
+**同样的数据看第二遍，loss 只降了 0.003。** 正常微调在这里应该明显下降。
+
+另一个决定性观察：**lr 从 1e-7 降到 1e-9（低 100 倍），前 15 步的 loss 曲线几乎不变**
+（0.48/0.47/0.38 vs 0.52/0.48/0.36）。学习率不起作用 → 更新量相对于 loss 的批间波动可以忽略。
+
+### 已排除的假设（全部实测，不要再试）
+
+| 假设 | 怎么验的 | 结论 |
+|---|---|---|
+| checkpoint 损坏 | 逐张量加载 stage0/stage1 | ❌ 145/145、147/147 全对，零不匹配 |
+| 参数没被更新 | 训练前后对比 `input_layernorm.weight` 和 embedding | ❌ delta 5e-3，相对 3e-3，**确实在变** |
+| loss 归一化错（mean vs sum） | 模拟 pipeline 的 `mean/num_microbatches` 与原梯度比 | ❌ ratio 1.066 ≈ 1，不是 1/32 |
+| loss scaler 放大梯度 | 查 `OptimizerConfig` | ❌ `bf16=True, fp16=False`，无 scaler |
+| `beta2=0.95` 太短 | 改成 0.999 跑 140 步对照 | ❌ **两套设置前 140 步几乎相同**（step100: 326 vs 339） |
+| micro-batch 太小（2 对/批） | 改成 4 行/micro-batch（8 对/批） | ❌ grad_norm 仍 19-105，波动一样大 |
+| 数据顺序（shuffle）导致 | 关掉 `shuffle_buffer` 重跑 | ❌ loss 仍 0.30-0.63 乱跳 |
+| 标签错位 | 打印每个 micro-batch 的 (query, doc, 期望标签) | ❌ 顺序正确：POS/neg 严格交替 |
+| 显存不足导致某种降级 | 查启动日志 | ❌ 96 GiB 卡上 **88 GiB 空闲** |
+
+### 仍然未知的
+
+- 为什么 grad_norm 从**第 5 步**就是 182（lr 只有 1e-7）
+- 为什么 repeated-batch 上 loss 不降，尽管参数确实在变
+- A100/PPU 用同一份数据、同一个 batch=32、lr=1e-5 却稳定（lr 高 78 倍）
+
+> **没有留下未验证的"修复"。** 试过的 `beta2=0.999` 和 `micro_batch_rows=4`
+> 两个改动经对照实验证明无效后都已回退（`290349f5` 及工作区还原）。
+>
+> **下一步建议**：在 Megatron 路径里打印**单个 micro-batch 的梯度方向**与
+> 下一批的一致性（cosine similarity），直接判断梯度是不是噪声。
+> 如果相邻两步梯度近似正交，问题在数据/loss 而非优化器。
+
 ## 五、缺什么
 
 | 项 | 原因 |
