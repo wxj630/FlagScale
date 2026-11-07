@@ -509,54 +509,70 @@ rank0（持 embedding + 18 层）的梯度比 rank1（18 层 + lm_head + final_n
 > 这条同时否定了"clip 导致有效学习率失衡"的猜测——不裁剪之后，
 > 梯度不但没有稳定下来，反而持续增大。
 
-### ✅ 根因找到了：lr=1e-7 在这个精度布局下学不动
+### ⚠️ 未解决：两个 lr 都不行（2026-11-07 复核后修正）
 
-**同一个数据集、同一条 Megatron 路径、同一个模型，只改学习率：**
+先前的"根因是 lr 太小"是**错的**，那个结论建在一个不充分的对照上。
 
-| lr | epoch 1 train_loss | epoch 2 train_loss | grad_norm 趋势 |
-|---|---|---|---|
-| **1e-7**（原配置） | 0.4903 | **0.4875**（几乎不动） | 17-326，涨到 756 |
-| **1e-5**（A100 的值） | 0.4328 | **0.2683**（明显下降） | 6-40，**在降** |
+#### 全量数据下的实测
 
-lr=1e-5 下到 step 124 时 `loss=0.0837`、`grad_norm=6.07`，模型正常学习。
-
-#### 为什么 1e-7 在 P800 上无效：bf16 参数分辨率
-
-两条路径的**参数精度布局不同**：
-
-| | FSDP2（A100 / PPU） | Megatron（P800） |
+| lr | 结果 | 崩塌点 |
 |---|---|---|
-| 模型参数本体 | **fp32**（`model.to(dtype=master_dtype)`） | **bf16**（`params_dtype=torch.bfloat16`） |
-| fp32 master 在哪 | 就是参数本身 | optimizer 的 shard 里 |
+| **1e-5**（A100/PPU 的值） | `loss=0.0000 / grad_norm=1.000` | **step 255** |
+| **1e-7**（登记例外） | 不崩，但**学不动**：重复两 epoch 只降 0.003 | — |
 
-算一下（权重典型量级 0.0114，取自 `input_layernorm.weight` 实测均值）：
+lr=1e-5 的失效模式与 **2026-10-26 那次记录完全一致，连时间点（step 250 左右）
+都对得上**——所以 AGENTS.md 那条例外是有实测依据的，不该撤销。
+
+**我犯错的地方**：判断"lr=1e-5 能学"用的对照只有 **2,048 行（64 步/epoch）**，
+**从未跑到 250 步**，正好整个绕开了崩塌窗口。epoch 1 的 0.4328 → epoch 2 的
+0.2683 看着像在学，其实只是小数据上的过拟合假象。
+
+#### lr=1e-7 为什么不学
+
+Megatron 路径的模型参数是 **bf16**，FSDP2 是 **fp32**：
 
 ```
-bf16 在该量级的 ULP        2.23e-05   （相对 0.195%）
-lr=1e-7 的单步更新          1.00e-07
-                        = 0.45% 个 ULP
-需要累积 222 步才够改变一位
+权重典型量级（input_layernorm 实测均值）   0.0114
+bf16 在该量级的 ULP                     2.23e-05
+lr=1e-7 的单步更新                       1.00e-07  = 0.45% 个 ULP
+→ 需要 222 步才够改变一位
 ```
 
-**所以 fp32 master 虽然每步都累积（Megatron 的 `step_with_ready_grads` 会做
-`_copy_main_params_to_model_params`），但 cast 回 bf16 时被吃掉**：
-小权重长期冻结在初始值，梯度持续累积却削减不掉——这正是
-`grad_norm` 单调涨到 756、loss 却不降的机制。
+fp32 master 每步确实在累积（Megatron 的 `step_with_ready_grads` 会调
+`_copy_main_params_to_model_params`），但 cast 回 bf16 时小权重被舍入回原值，
+所以冻结。梯度削减不掉 → `grad_norm` 单调涨到 756。
 
-#### 这条推翻了 AGENTS.md §八 的登记
+#### 试过 fp32 模型参数：被厂商 JIT 挡住
 
-AGENTS.md 里写"P800 reranker 必须 lr=1e-7，1e-5 和 1e-6 都发散"。
-**实测相反**：1e-5 稳定且能学，1e-7 学不动。
+显存够（fp32 每 stage 15.3 GiB / 96 GiB），但改成 fp32 后
+`XMLIR_BMM_DISPATCH_VALUE=0` **不再能绕过 XBLAS 的 bmm JIT 崩溃**：
 
-那个"1e-5 发散"的结论来自 **2026-10-26 的旧 run**——而那时
-`false_token_id` 还是 9692（评的是 `'icken'`），**该平台所有历史 reranker
-结论已作废**（见上一节）。lr 那条跟着失效了。
+```
+/tmp/xpujitc-temp/.../0.xpu:69982:41: error:
+explicit instantiation of 'bmm_one_loop' does not refer to a function template
+```
 
-换句话说：旧 run 的"发散"是 token bug，不是 lr 太大。**把 lr 降到 1e-7 只是
-让模型慢到看起来不崩，代价是它根本不学。**
+这个开关只对 bf16 的 bmm 路径有效。已回退。
 
-> **待办**：AGENTS.md §八 的 P800 lr 例外需要改。建议改成 lr=1e-5（与 A100/PPU
-> 一致），前提是先用完整配置跑通一个 epoch 确认不发散。
+#### 当前的判断
+
+**P800 的 reranker 目前没有可用的学习率**：1e-5 崩、1e-7 不学、fp32 参数起不来。
+
+这不是配置问题，是**bf16 模型参数 + 厂商 bmm 精度路径**共同限制的结果。
+剩下的可行方向：
+
+1. **让 bmm 走 fp32 但不换全模型精度**——只把 score 那一层
+   （`last_hidden @ head.t()`）提到 fp32，模型其余部分仍 bf16。但这解决不了
+   参数更新的分辨率问题。
+2. **换 loss**：在 bf16 参数下，用对 logit 幅度有约束的 loss（如 margin/温度
+   缩放的 BCE），让有效梯度更大，从而在同样的 bf16 网格上能推动权重。
+3. **绕开 bf16 参数**：用 `use_distributed_optimizer=False` + fp16 混合精度
+   （fp16 的 ULP 在 0.0114 处是 2.8e-07，比 bf16 细 80 倍），并验证
+   `XMLIR_BMM_DISPATCH_VALUE=0` 在 fp16 下是否有效。
+
+> **没有留下未验证的"修复"。** 今天试过的全部回退：
+> `beta2=0.999`（`290349f5`）、`micro_batch_rows=4`、`clip_grad=1000`、
+> `params_dtype=fp32`，以及 AGENTS.md 那条例外的撤销。
 
 ## 五、缺什么
 
