@@ -547,7 +547,21 @@ class MegatronPipelineTrainer:
             min_lr=min_lr,
             weight_decay=weight_decay,
             adam_beta1=0.9,
-            adam_beta2=0.95,
+            # beta2 = 0.999, matching torch.optim.AdamW's default and therefore
+            # the FSDP2 path, NOT Megatron's LLM-pretraining 0.95.
+            #
+            # At 0.95 the second-moment window is ~20 steps instead of ~1000.
+            # This reranker's gradient norm swings 17-454 between steps, so a
+            # short window makes sqrt(v) itself noisy and the update direction
+            # jitters: measured on P800, 99.9% of steps hit the clip threshold
+            # (mean grad_norm 36.5), and the run collapsed to loss=0.0000 /
+            # grad_norm=1.0 at step 5,810 with validation_loss 20.87.
+            #
+            # 0.95 is right for pretraining from scratch on billions of tokens
+            # where clipping rarely fires; it is not the setting for a
+            # small-learning-rate fine-tune.  Keep the two backends on the same
+            # optimizer so cross-platform numbers stay comparable.
+            adam_beta2=0.999,
             adam_eps=1e-8,
             clip_grad=clip_grad,
             bf16=True,
