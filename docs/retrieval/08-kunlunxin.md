@@ -509,24 +509,54 @@ rank0（持 embedding + 18 层）的梯度比 rank1（18 层 + lm_head + final_n
 > 这条同时否定了"clip 导致有效学习率失衡"的猜测——不裁剪之后，
 > 梯度不但没有稳定下来，反而持续增大。
 
-### 结论：目前的最可能根因
+### ✅ 根因找到了：lr=1e-7 在这个精度布局下学不动
 
-**梯度方向一致（cos 0.80-0.92）、参数在更新（delta 5e-3）、lr 生效，
-但 grad_norm 单调增大、loss 不降。** 这三件事同时成立的画像是：
+**同一个数据集、同一条 Megatron 路径、同一个模型，只改学习率：**
 
-**这个 8B 模型在 P800 上用 Megatron PP=2、lr=1e-7 微调，优化器状态或
-精度路径有系统性偏差**（最可能在 fp32 master ↔ bf16 working copy 之间，
-或分布式优化器的 shard 累加）。不是数据问题、不是标签问题、不是并行切分问题。
+| lr | epoch 1 train_loss | epoch 2 train_loss | grad_norm 趋势 |
+|---|---|---|---|
+| **1e-7**（原配置） | 0.4903 | **0.4875**（几乎不动） | 17-326，涨到 756 |
+| **1e-5**（A100 的值） | 0.4328 | **0.2683**（明显下降） | 6-40，**在降** |
 
-> **没有留下未验证的"修复"。** 试过的三个改动经对照实验证明无效后全部回退：
-> `beta2=0.999`（`290349f5`）、`micro_batch_rows=4`、`clip_grad=1000`（未提交）。
->
-> **下一步建议（按优先级）**：
-> 1. 用**单卡 `device_type=cuda` + 纯 torch DDP**（不走 Megatron）在 P800 上
->    跑同样的 200 步。如果 loss 正常下降，问题就锁定在 Megatron 的
->    distributed optimizer 上——这也正好绕过它。
-> 2. 若必须用 Megatron，试 `use_distributed_optimizer=False`（参数会重复存储，
->    显存可能不够，但能定位是不是 shard 累加的问题）。
+lr=1e-5 下到 step 124 时 `loss=0.0837`、`grad_norm=6.07`，模型正常学习。
+
+#### 为什么 1e-7 在 P800 上无效：bf16 参数分辨率
+
+两条路径的**参数精度布局不同**：
+
+| | FSDP2（A100 / PPU） | Megatron（P800） |
+|---|---|---|
+| 模型参数本体 | **fp32**（`model.to(dtype=master_dtype)`） | **bf16**（`params_dtype=torch.bfloat16`） |
+| fp32 master 在哪 | 就是参数本身 | optimizer 的 shard 里 |
+
+算一下（权重典型量级 0.0114，取自 `input_layernorm.weight` 实测均值）：
+
+```
+bf16 在该量级的 ULP        2.23e-05   （相对 0.195%）
+lr=1e-7 的单步更新          1.00e-07
+                        = 0.45% 个 ULP
+需要累积 222 步才够改变一位
+```
+
+**所以 fp32 master 虽然每步都累积（Megatron 的 `step_with_ready_grads` 会做
+`_copy_main_params_to_model_params`），但 cast 回 bf16 时被吃掉**：
+小权重长期冻结在初始值，梯度持续累积却削减不掉——这正是
+`grad_norm` 单调涨到 756、loss 却不降的机制。
+
+#### 这条推翻了 AGENTS.md §八 的登记
+
+AGENTS.md 里写"P800 reranker 必须 lr=1e-7，1e-5 和 1e-6 都发散"。
+**实测相反**：1e-5 稳定且能学，1e-7 学不动。
+
+那个"1e-5 发散"的结论来自 **2026-10-26 的旧 run**——而那时
+`false_token_id` 还是 9692（评的是 `'icken'`），**该平台所有历史 reranker
+结论已作废**（见上一节）。lr 那条跟着失效了。
+
+换句话说：旧 run 的"发散"是 token bug，不是 lr 太大。**把 lr 降到 1e-7 只是
+让模型慢到看起来不崩，代价是它根本不学。**
+
+> **待办**：AGENTS.md §八 的 P800 lr 例外需要改。建议改成 lr=1e-5（与 A100/PPU
+> 一致），前提是先用完整配置跑通一个 epoch 确认不发散。
 
 ## 五、缺什么
 
