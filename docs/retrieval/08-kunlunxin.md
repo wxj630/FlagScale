@@ -574,6 +574,43 @@ explicit instantiation of 'bmm_one_loop' does not refer to a function template
 > `beta2=0.999`（`290349f5`）、`micro_batch_rows=4`、`clip_grad=1000`、
 > `params_dtype=fp32`，以及 AGENTS.md 那条例外的撤销。
 
+#### ✅ PP=4 + 整步 micro-batch 能跑（2026-11-08）
+
+PP=2 的所有失败有一个共同前提：**每步 32 行被迫拆成 32 个 micro-batch**
+（1 行 = 2 对），因为整步在 PP=2 上 OOM（96 GiB 只剩 1.42 GiB）。
+
+**PP=4 后显存问题消失**，可以把整步 32 行（64 对）放进**一个** micro-batch，
+这正好等于 A100/PPU（FSDP2）的每次前向粒度。
+
+| 配置 | lr | 结果 |
+|---|---|---|
+| PP=2, 1 行/mb | 1e-5 | step **255** 崩 |
+| PP=2, 1 行/mb | 5e-6 | step **170** 崩 |
+| PP=2, 1 行/mb | 1e-7 | 不崩但学不动 |
+| PP=2, 32 行/mb | 1e-5 | **OOM**（1.42 GiB 空闲） |
+| **PP=4, 32 行/mb** | **1e-5** | **step 225 仍在跑**，loss 0.256，grad_norm 10.4 |
+
+PP=4 显存：每卡 3.2 GiB 参数、**92.6 GiB 空闲**。
+
+**为什么 PP=4 有效**：关键不只是每卡少了 9 层，而是**终于能把整步当一个
+micro-batch**。PP=2 下 2 对/micro-batch 的 BCE 方差极大（每批只 1 正 1 负），
+噪声梯度把权重推进了 `loss=0` 的饱和区；PP=4 下每批 64 对，与 A100 一致。
+
+**代价**：吞吐从 6.3 降到 **3.8 对/s**（PP=4 流水线气泡）。按"优先跑通、
+速度后优化"，这是可接受的起点。
+
+转换 PP=4 权重：
+```bash
+python -m flagscale.models.retrieval.qwen3_reranker_megatron \
+    --model /flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B \
+    --pp 4 --out .../megatron-reranker/work/pp4-8b
+```
+产出 4 个 stage（2.36B / 1.74B / 1.74B / 2.36B 参数）。
+
+> **验证边界**：已跑到 step 225（lr 已达峰值 1e-5）、零崩塌。
+> **完整 epoch 的 val loss 仍在跑**，尚未拿到。若它落在 0.5-0.6 量级
+> （而非 PP=2 的 20.87），才可确认这是可用配置。
+
 ## 五、缺什么
 
 | 项 | 原因 |
