@@ -7,6 +7,7 @@
 
 | 文档 | 用途 |
 |---|---|
+| [**00-datasets**](00-datasets.md) | **数据集总目录**：三模型 × 预训练/微调/评测，一页看全（含可得性）|
 | [01-bge-m3](01-bge-m3.md) | 4 个基准（MIRACL/MKQA/MLDR/NarrativeQA）与主指标 |
 | [02-qwen3-embedding](02-qwen3-embedding.md) | MMTEB 216 任务 |
 | [03-qwen3-reranker](03-qwen3-reranker.md) | 6 个基准；**注意论文没逐项声明指标**，FollowIR 是 p-MRR |

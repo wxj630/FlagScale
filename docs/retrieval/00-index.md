@@ -26,6 +26,7 @@ docs/retrieval/
 
 | 编号 | 文档 | 论文训练数据 | 论文评测集 | **论文主指标** |
 |---|---|---|---|---|
+| **00** | [**数据集目录**](papers/00-datasets.md) | 三个模型的**预训练 / 微调 / 评测**数据一页看全：来源、规模、可得性、我们实际用了什么 | — | **全览** |
 | 01 | [BGE-M3](papers/01-bge-m3.md) | 预训练 1.2B + 微调 1.6M | MIRACL / MKQA / MLDR / NarrativeQA | **nDCG@10** + **Recall@100**（MKQA） |
 | 02 | [Qwen3-Embedding](papers/02-qwen3-embedding.md) | 弱监督 150M + 微调 7M + 12M 合成 | MMTEB 216 任务 | 逐任务主指标 |
 | 03 | [Qwen3-Reranker](papers/03-qwen3-reranker.md) | 无预训练，仅微调 7M + 12M | top-100 重排，6 个基准 | **nDCG@10**（MTEB 系推断）+ p-MRR（FollowIR） |
