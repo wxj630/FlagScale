@@ -814,7 +814,13 @@ class MegatronPipelineTrainer:
                 #
                 # Training never hit it because `_RowStream` already yields
                 # exactly `pairs_per_microbatch` pairs per `next()`.
-                step = max(1, int(self.pairs_per_microbatch))
+                # `micro_batch_size` must not exceed the chunk: with PP=4's
+                # 32 rows/microbatch, `pairs_per_microbatch` is 64 while an
+                # 8-pair eval chunk is smaller.  Asking the schedule for a
+                # 64-wide tensor against 8 pairs of data reproduces the original
+                # mismatch from the other direction: "hidden batch 64 !=
+                # len(lengths)=8".
+                step = max(1, min(int(self.pairs_per_microbatch), len(chunk)))
                 microbatches = max(1, len(chunk) // step)
                 usable = microbatches * step
                 if usable != len(chunk):
@@ -842,7 +848,12 @@ class MegatronPipelineTrainer:
                         model=self.models,
                         num_microbatches=microbatches,
                         seq_length=self.max_length,
-                        micro_batch_size=self.pairs_per_microbatch,
+                        # `step`, not pairs_per_microbatch: the chunk may be
+                        # smaller than a training microbatch (PP=4 uses 64
+                        # pairs, an 8-pair eval chunk fits only 8), and every
+                        # stage shapes its p2p tensors from this value, so it
+                        # must agree with how the stream was sliced above.
+                        micro_batch_size=step,
                         decoder_seq_length=self.max_length,
                         forward_only=True,
                     )
