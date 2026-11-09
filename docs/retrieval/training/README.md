@@ -5,6 +5,7 @@
 
 | 文档 | 用途 |
 |---|---|
+| [**21-a100-code-walkthrough**](21-a100-code-walkthrough.md) | **A100 基准代码讲解**：模型适配器、数据管线、训练循环、存盘/续训、评测，逐模块带设计理由与踩过的坑 |
 | [**19-adaptation-report**](19-adaptation-report.md) | **给甲方的适配说明**：标准流程、四平台各自改了什么、工作量汇总、遗留问题 |
 | [**18-environment-and-scripts**](18-environment-and-scripts.md) | **换机器上手手册**：四平台环境实况、Python 入口、路径约定、训练/评测/分析脚本用法 |
 | [15-launch-commands](15-launch-commands.md) | **各芯片的启动命令原文**。每台机器只有一条验证过的路径，附每个踩过的坑与报错 |
