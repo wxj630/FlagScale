@@ -55,7 +55,7 @@ docs/retrieval/
 | 编号 | 文档 | 内容 |
 |---|---|---|
 | 06 | [GPU-hours 估算](analysis/06-gpu-hours.md) | 三口径 × 两种训练量；含三篇论文自己声明的集群规模 |
-| 10 | [**微基准与折扣系数**](analysis/10-microbench-discount.md) | 六家芯片实测 bf16/FP16/带宽 → 折扣系数（含/不含 FP32 两口径）；**验收判定的核心** |
+| 10 | [**微基准与折扣系数**](analysis/10-microbench-discount.md) | **验收判定的核心**。官方系数（2.182/1.410/1.031，判定基准）+ 我们实测系数（1.321/1.050/0.711，用于归因），两套对照 |
 | 13 | [**拖累算子清单**](analysis/13-bottleneck-ops.md) | 按"占差距的比例"排序，含 kernel 名与调用次数，交给算子适配方 |
 | 11 | [给厂商的问题清单](analysis/11-vendor-questions.md) | 量化后的剩余瓶颈 + 复现脚本 + 已排除方向 |
 
