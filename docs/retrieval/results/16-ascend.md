@@ -177,7 +177,12 @@ A100 的 `docs/retrieval/07-a100.md` 微基准完全相同：
 - **GELU / SiLU / add / mul / sum / softmax / bmm 慢 2.2–3.2×**。
 - BGE 的 FFN 用 GELU + LayerNorm，Reranker 用 RMSNorm + SiLU，
   所以 BGE/Reranker 的慢点都在**归一化、激活、逐元素和小矩阵**，
-  不在 GEMM；这与 PPU（GEMM 占差距 44%）相反，也与昆仑芯（GELU 占 66%）部分重叠。
+  不在 GEMM。
+
+  > ⚠️ **口径提醒**：上面 PPU 的「GEMM 占差距 44%」和昆仑芯的「GELU 占 66%」
+  > 是**整步 profiler 的权重**（占与 A100 差距的百分比）；本节昇腾的
+  > 「RMSNorm 6.5×」是**微基准倍数**，两者不可直接对比。
+  > 昇腾的真实 step 权重还没测（见 4.1 的说明）。
 
 **按模型看：**
 

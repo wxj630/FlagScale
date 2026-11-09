@@ -164,15 +164,29 @@ profiler 告诉我们 GELU 花了 1,028.9 ms、比 A100 慢 25.4×，
 这些答案在 kernel 实现里，属于**运行时层的工作**。我们能做的只是把
 "哪个 kernel、调用多少次、花了多久、占总差距多少"测准，然后交出去。
 
-### 5.2 需要为每个芯片单独适配 profiler
+### 5.2 四个平台的 profiler 可用性（实测状态不同）
 
-| 平台 | 特殊要求 |
-|---|---|
-| 昆仑芯 | `XPU_ENABLE_PROFILER_TRACING=1` + `XPU_CUPTI_ENABLE_DEVICE=0`；event key 是裸 kernel 名 |
-| PPU | 未单独验证（profiler 可用性未测）|
-| 昇腾 | 未验证 |
+| 平台 | 整步 profiler | 微基准 | 特殊要求 |
+|---|---|---|---|
+| **A100** | ✅ 有 | ✅ 有 | 无，标准 `torch.profiler` |
+| **昆仑芯 P800** | ✅ 有 | ✅ 有 | `XPU_ENABLE_PROFILER_TRACING=1` + `XPU_CUPTI_ENABLE_DEVICE=0`（逻辑设备号 0，不是物理卡号）；event key 是**裸 kernel 名**（`xpukernel_xpu3::gelu_bwd_...`），不是 `aten::` 前缀 |
+| **PPU ZW810E** | ✅ 有 | ✅ 有 | `profile_step_segments.py` 直接可用。**坑：同时输出 `aten::` 层和底层 kernel 层，两者相加正好等于总时间——是同一份工作重复计数，必须只取一层**（我们取 `aten::` 层）|
+| **昇腾 910C** | ❌ **只有微基准** | ✅ 有 | `profile_op_micro_npu.py` 产出的 `op-micro/ascend_910c.json` |
 
-**每接一款新芯片，profiler 本身要先调通**，这是一次性成本但不小。
+**三个平台有整步 profiler，一个没有**：
+
+- A100 / 昆仑芯 / PPU 的慢算子结论都来自**真实 step 的 profiler**（权重可信）
+- **昇腾只有微基准**，`16-ascend.md` 自己写明了这一点：
+
+  > 这是**微基准**，不是整步 profiler；它用来找候选慢算子，不能直接按倍数排优先级。
+  > 真实 step 的权重仍需用 `profile_step_segments.py` 在 NPU 上补测。
+
+  所以「RMSNorm 6.5×」这类数字**是候选信号，不是最终权重**——
+  要变成"占差距的百分比"还需要 NPU 上的整步测量。
+
+> **每接一款新芯片，profiler 要先调通**，这是真实存在的一次性成本：
+> 昆仑芯要两个环境变量且键名不是 `aten::`；昇腾的 NPU profiler 还没接
+> （目前只有微基准）。
 
 ### 5.3 归因依赖"两边 kernel 名能对上"
 
