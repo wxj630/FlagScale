@@ -5,6 +5,7 @@
 | 文档 | 用途 |
 |---|---|
 | [10-microbench-discount](10-microbench-discount.md) | **折扣系数**——达标判定的核心。六家芯片的 bf16/FP16/带宽实测，两种口径（含/不含 FP32） |
+| [**20-slow-op-profiling**](20-slow-op-profiling.md) | **方法说明（给甲方）**：三层识别方法、脚本用法、局限、为什么该移交运行时层 |
 | [13-bottleneck-ops](13-bottleneck-ops.md) | **慢算子清单**，按"占差距的比例"排序，交给算子适配方 |
 | [06-gpu-hours](06-gpu-hours.md) | GPU-hours 估算（三口径），含论文自己声明的集群 |
 | [11-vendor-questions](11-vendor-questions.md) | 给厂商的问题清单 |
