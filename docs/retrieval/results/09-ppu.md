@@ -155,7 +155,7 @@ base 指标比；**吞吐**按 docx 定义（训练集总样本数 ÷ 训练总�
 
 > 「系数」是按 docx §4.2 **建议的算法**我们自己算出来的 **0.711**，
 > **不是验收方给定的数值**（docx 只给公式和 0.8，原文标为"建议讨论"）。
-> 推导见 [10-microbench-discount.md](10-microbench-discount.md) §一·五，
+> 推导见 [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·五，
 > 门槛因此是 A100 × 0.711 × 0.8 = 67.1 样本/s。
 > 这个系数是 PPU 唯一与 A100 同量级、且各平台里最低的一个，所以即便 kernel
 > 实际慢 1.78×，三项吞吐仍有两项达标、BGE 只差 0.18%。
@@ -163,7 +163,7 @@ base 指标比；**吞吐**按 docx 定义（训练集总样本数 ÷ 训练总�
 > ⚠️ **本节判定用的是我们实测的系数。** 验收方另有一套（其 BF16/FP32 倍数换算），
 > 用它算的达成率更低。**两套都必须报**，对照表见
 > [14-inference-throughput.md](14-inference-throughput.md) §二·五 与
-> [10-microbench-discount.md](10-microbench-discount.md) §一·六。
+> [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·六。
 
 
 **一句话**：精度与 A100 几乎完全相同（99.9-100.1%，三家最接近）；
@@ -512,7 +512,7 @@ FlagGems 的 `backends.yaml` 里 **`thead`（平头哥 PPU）也是官方后端*
 > Triton 版本），不是实测结果。昆仑芯的实测结论是"全量开启会卡死 + 三个
 > 兼容性 bug"，PPU 走同一套 FlagGems 代码，**很可能遇到同样的 `sub` 标量
 > 路径与 SDPA dropout 问题**，需要先验证。
-> 接入开关的用法见 [12-flaggems-integration.md](12-flaggems-integration.md)。
+> 接入开关的用法见 [12-flaggems-integration.md](../training/12-flaggems-integration.md)。
 
 FlagGems 的 thead 后端声明：
 
@@ -564,7 +564,7 @@ flag_gems 5.4.0 已经是装好的状态，所以直接测了（13 个算子，�
 > 同为 44 TFLOP/s**。
 >
 > **教训：PPU 单算子测量对设备状态极度敏感（同形状可差 2.15 倍），
-> 不能用微基准定优化优先级。**详见 [13-bottleneck-ops.md](13-bottleneck-ops.md)。
+> 不能用微基准定优化优先级。**详见 [13-bottleneck-ops.md](../analysis/13-bottleneck-ops.md)。
 
 ### 预期收益（按算子占比推算）
 

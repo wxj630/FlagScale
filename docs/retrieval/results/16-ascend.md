@@ -31,7 +31,7 @@
 
 > 系数：910C 实测 bf16 GEMM 316.02 TFLOPS（A100 的 119%）、带宽 1259.7 GB/s
 > （A100 的 79%），不含 FP32 的三项几何平均 = **1.050**
-> （见 [10-microbench-discount.md](10-microbench-discount.md)）。
+> （见 [10-microbench-discount.md](../analysis/10-microbench-discount.md)）。
 > ⚠️ **这个系数是按 docx §4.2 建议的算法我们自己算的，不是验收方给定的数值**——
 > docx 只给公式和 `× 0.8`，系数部分原文标为"建议讨论"。
 > 门槛 = A100 × 1.050 × 0.8：
@@ -40,7 +40,7 @@
 > ⚠️ **本节判定用的是我们实测的系数。** 验收方另有一套（其 BF16/FP32 倍数换算），
 > 用它算的达成率更低。**两套都必须报**，对照表见
 > [14-inference-throughput.md](14-inference-throughput.md) §二·五 与
-> [10-microbench-discount.md](10-microbench-discount.md) §一·六。
+> [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·六。
 
 
 **一句话**：CLIP 精度与 A100 几乎一致，吞吐只差 5%；BGE 精度也一致（trained nDCG

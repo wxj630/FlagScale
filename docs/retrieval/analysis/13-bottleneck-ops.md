@@ -11,7 +11,7 @@
 | 昆仑芯 P800 | 5.4.0（vendor `kunlunxin`） | **10 个里 9 个更慢**（`sum` 0.03×、`layer_norm` 0.04×、GELU 0.65×） | ❌ 跑不完（JIT 每 kernel ~1.6 s + 4 个崩溃点） |
 | PPU ZW810E | 5.4.0（vendor `thead`） | **13 个里 12 个更慢，GEMM 持平**（0.99×） | ⚠️ 未测 |
 
-细节见 [12-flaggems-integration.md](12-flaggems-integration.md)。
+细节见 [12-flaggems-integration.md](../training/12-flaggems-integration.md)。
 **所以下面这些算子必须由厂商或适配方在原生 kernel 层面解决，换 FlagGems 无效。**
 
 ## 一、口径（为什么这份清单可信）
@@ -26,7 +26,7 @@
 
 **为什么不用微基准排优先级**：同一算子在不同设备状态下能差 2.15 倍
 （PPU 的 `mm_hidden` 就被误测成 1.49× 加速），小 batch 外推更是会把
-占比算反（详见 [08](08-kunlunxin.md) 的教训）。**只有整步实测能定优先级。**
+占比算反（详见 [08](../results/08-kunlunxin.md) 的教训）。**只有整步实测能定优先级。**
 
 排序依据 = **该项占"与 A100 差距"的比例**，不是"慢多少倍"。
 一个慢 5× 但每步只调 1 次的算子，不如一个慢 1.2× 但占 44% 的算子重要。
@@ -158,7 +158,7 @@ export XPU_ENABLE_PROFILER_TRACING=1 XPU_CUPTI_ENABLE_DEVICE=0
 ```
 
 每个数字的完整明细（含全部 kernel 名与调用次数）见
-[08-kunlunxin.md](08-kunlunxin.md) 与 [09-ppu.md](09-ppu.md) 的
+[08-kunlunxin.md](../results/08-kunlunxin.md) 与 [09-ppu.md](../results/09-ppu.md) 的
 「算子级剖析」章节。
 
 

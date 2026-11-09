@@ -49,14 +49,14 @@ base 指标比；**吞吐**按 docx 定义（训练集总样本数 ÷ 训练总�
 > 「系数」是按 docx §4.2 **建议的算法**（bf16 FLOPS 与带宽的几何平均，不含 FP32）
 > 我们自己算出来的 **1.321**，**不是验收方给定的数值**——docx 只给了公式和 0.8，
 > 没给具体系数，且原文标为"建议讨论"。推导与原文引用见
-> [10-microbench-discount.md](10-microbench-discount.md) §一·五。
+> [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·五。
 > 按系数 1.321 判定：reranker **78% ❌**（需提速 1.28×）、CLIP **66.3% ❌**（需提速 1.51×）、
 > BGE **43.3% ❌**（需提速 2.31×）。
 
 > ⚠️ **本节判定用的是我们实测的系数。** 验收方另有一套（其 BF16/FP32 倍数换算），
 > 用它算的达成率更低。**两套都必须报**，对照表见
 > [14-inference-throughput.md](14-inference-throughput.md) §二·五 与
-> [10-microbench-discount.md](10-microbench-discount.md) §一·六。
+> [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·六。
 
 
 **一句话**：精度全部达标且最接近 A100（99.4-100.3%）；
@@ -915,7 +915,7 @@ FlagGems（`FlagOpen/FlagGems`，克隆在 `FlagOS/FlagGems`）的 `backends.yam
 > **先纠正一个前提**：`train.hardware.use_flaggems` 在此之前是**死配置**——
 > 它只被插值成环境变量 `FLAGOS_USE_FLAGGEMS`，没有任何代码读取，设成 true
 > 也不生效。现已由 `flagscale/train/utils/flaggems.py` 接通
-> （见 [12-flaggems-integration.md](12-flaggems-integration.md)）。
+> （见 [12-flaggems-integration.md](../training/12-flaggems-integration.md)）。
 >
 > **接通后的真实训练结果（batch 10 × accum 4）**：
 >

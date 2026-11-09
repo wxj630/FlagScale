@@ -1,32 +1,69 @@
-# Retrieval 模型评测对齐文档
+# Retrieval 模型评测文档
 
-三个检索模型（BGE-M3 / Qwen3-Embedding / Qwen3-Reranker）的**数据集、测试集、
-评测指标**与原论文的对照。目的：让我们的复现结果能与论文数值直接比较。
+三个检索模型（BGE-M3 / Qwen3-Embedding / Qwen3-Reranker）在多芯片平台上的
+**论文对照、训练方案、实验结果、分析、验收**。
 
-原文依据：`Papers/M3-Embedding/main.tex`、`Papers/Qwen3-Embedding/contents/evaluation.tex`、
-`Papers/CLIP/clip_paper.tex`（LaTeX 原文，最准确）。
+**入口**：先看[目录结构](#目录结构)，再按需进子目录。
+
+## 目录结构
+
+文档按**用途**分五个模块，编号保留原有顺序，便于从旧链接跳转：
+
+```
+docs/retrieval/
+├── 00-index.md              本文件
+├── papers/      01-05       论文对照：数据集、指标、与实现的差异
+├── training/    12, 15      训练侧：并行方案、FlagGems 接入、各芯片启动命令
+├── results/     07-09, 14, 16   实验结果：各平台精度/吞吐 + 原始 JSON
+│   └── data/                实测产物（推理吞吐、算子微基准）
+├── analysis/    06, 10, 11, 13  分析：GPU-hours、折扣系数、慢算子、厂商问题
+└── acceptance/  17          验收：docx 条款逐条对照
+```
 
 ## 索引
 
-| 编号 | 文档 | 训练数据 | 论文评测集 | **论文主指标** |
+### papers/ — 论文对照（数据集与指标）
+
+| 编号 | 文档 | 论文训练数据 | 论文评测集 | **论文主指标** |
 |---|---|---|---|---|
-| 01 | [BGE-M3](01-bge-m3.md) | 预训练 1.2B（无监督）+ 微调 1.6M（含 T²-Ranking） | MIRACL / MKQA / MLDR / NarrativeQA | **nDCG@10** + **Recall@100**（MKQA） |
-| 02 | [Qwen3-Embedding](02-qwen3-embedding.md) | 弱监督 150M + 微调 7M 标注 + 12M 合成 | MMTEB 216 任务 | 逐任务主指标 |
-| 03 | [Qwen3-Reranker](03-qwen3-reranker.md) | 无预训练，仅微调 7M + 12M | top-100 重排，6 个基准 | **nDCG@10**（MTEB 系推断）+ p-MRR（FollowIR） |
-| 04 | [CLIP](04-clip.md) | 预训练 WIT 4 亿对（未公开）<br>**我们的微调**：MSCOCO Captions 2017 train（21 shard / 19 GB，全参 3 epoch） | Flickr30k / MSCOCO 5k | **R@1 / R@5 / R@10**（双向）<br>⚠️ **论文无 nDCG** |
-| 05 | [与当前实现的差异](05-gaps.md) | — | 逐项列出我们现在跑的 vs 论文要求 | — |
-| 06 | [GPU-hours 估算](06-gpu-hours.md) | — | **§十二 总表**：三口径 × 两种训练量（1 epoch / 论文量）= **A 14,910、B 11,550、C 2,903 GPU-h**，单机 8 卡最便宜 15.1 天 |
-| **07** | [**A100 基准结果**](07-a100.md) | — | 基准平台：训练耗时、吞吐、完整检索指标（含 nDCG） |
-| **08** | [**昆仑芯 P800 结果**](08-kunlunxin.md) | — | **精度 ✅ 99.4-100.3%；吞吐 Reranker ✅ / CLIP 需 1.51× / BGE 需 2.31×** |
-| **09** | [**PPU ZW810E 结果**](09-ppu.md) | — | **精度 ✅ 99.9-100.1%（CLIP 已重训复核）；吞吐只有 CLIP 达标（102%），BGE 99.8%、Reranker 90%** |
-| **10** | [**微基准与折扣系数**](10-microbench-discount.md) | — | 六家芯片实测 bf16/带宽 → 折扣系数（含/不含 FP32 两口径） |
-| **11** | [**给厂商的问题清单**](11-vendor-questions.md) | — | 量化后的剩余瓶颈 + 复现脚本 + 已排除方向 |
-| **12** | [**FlagGems 接入说明**](12-flaggems-integration.md) | — | **后续算子优化的入口**：开关怎么开、怎么验证生效、实测为何还不可用 |
-| **13** | [**拖累算子清单**](13-bottleneck-ops.md) | — | **交给算子适配方**：按占差距排好序，含 kernel 名与调用次数 |
-| **14** | [**推理吞吐**](14-inference-throughput.md) | — | **只计模型前向**（不含反向/优化器）：昆仑芯 BGE 160.9、CLIP 321.1、Reranker 21.2；PPU BGE 74.1、CLIP 270.9。原始 JSON 在 `data/inference/` |
-| **15** | [**各芯片启动命令**](15-launch-commands.md) | — | **每台机器只有一条验证过的启动路径**：A100 / 昆仑芯 / PPU 的命令原文、各自必需的环境变量、以及每个踩过的坑与报错。PPU 必须进容器，卡号要在容器内重新编号 |
-| **16** | [**昇腾 910C 结果**](16-ascend.md) | — | **精度 BGE/CLIP ✅；训练吞吐 CLIP 95.1% 门槛（需 1.05×）/ BGE 55.8%（需 1.79×）；推理 BGE 155.2、CLIP 391.0、Reranker 23.0 对/s；关键慢算子 RMSNorm 6.5×、LayerNorm 2.8×、激活 2.2-2.5×，GEMM 反而比 A100 快** |
-| **17** | [**验收条款清单**](17-acceptance-checklist.md) | — | **docx 原文逐条对照**：硬性要求（精度≥95%、吞吐≥A100×系数×0.8、训练与推理都要）、**系数只有算法建议无数值**、§4.3 自认预训练做不到、达成情况与 4 个待确认问题 |
+| 01 | [BGE-M3](papers/01-bge-m3.md) | 预训练 1.2B + 微调 1.6M | MIRACL / MKQA / MLDR / NarrativeQA | **nDCG@10** + **Recall@100**（MKQA） |
+| 02 | [Qwen3-Embedding](papers/02-qwen3-embedding.md) | 弱监督 150M + 微调 7M + 12M 合成 | MMTEB 216 任务 | 逐任务主指标 |
+| 03 | [Qwen3-Reranker](papers/03-qwen3-reranker.md) | 无预训练，仅微调 7M + 12M | top-100 重排，6 个基准 | **nDCG@10**（MTEB 系推断）+ p-MRR（FollowIR） |
+| 04 | [CLIP](papers/04-clip.md) | 预训练 WIT 4 亿对（未公开）<br>**我们的微调**：MSCOCO Captions 2017 train | Flickr30k / MSCOCO 5k | **R@1 / R@5 / R@10**（双向）<br>⚠️ **论文无 nDCG** |
+| 05 | [与当前实现的差异](papers/05-gaps.md) | — | 我们跑的 vs 论文要求，逐项列出 | — |
+
+### training/ — 训练与并行方案
+
+| 编号 | 文档 | 内容 |
+|---|---|---|
+| 15 | [**各芯片启动命令**](training/15-launch-commands.md) | **每台机器只有一条验证过的启动路径**。A100 / 昆仑芯 / PPU 的命令原文、必需环境变量、每个踩过的坑与报错原文。PPU 必须进容器，卡号在容器内重新编号 |
+| 12 | [**FlagGems 接入说明**](training/12-flaggems-integration.md) | 开关怎么开、怎么验证生效、实测为何还不可用（两平台都测了，都不快） |
+
+### results/ — 实验结果（各平台）
+
+| 编号 | 文档 | 内容 |
+|---|---|---|
+| **07** | [**A100 基准结果**](results/07-a100.md) | **基准平台**。训练耗时、吞吐、按论文口径的检索指标、reranker 存盘 bug 复核 |
+| **08** | [**昆仑芯 P800**](results/08-kunlunxin.md) | 精度 99.4-100.3%；吞吐与 A100 的差距归因（GELU 25×、胶水算子）；**reranker 收敛问题排查全过程** |
+| **09** | [**PPU ZW810E**](results/09-ppu.md) | 精度 99.9-100.1%（CLIP 已重训复核）；吞吐 CLIP 达标、BGE/Reranker 未达 |
+| **16** | [**昇腾 910C**](results/16-ascend.md) | 精度 BGE/CLIP ✅；慢算子是 RMSNorm/LayerNorm/激活，**GEMM 反而比 A100 快** |
+| **14** | [**推理吞吐（四平台）**](results/14-inference-throughput.md) | **只计模型前向**。A100 395.2 / 昆仑芯 160.9 / 昇腾 155.2 / PPU 74.1（BGE） |
+| — | [data/](results/data/) | 实测产物：`inference/*.json`（推理吞吐）、`op-micro/*.json`（算子微基准）、`ppu_clip_*.json`（CLIP 评测） |
+
+### analysis/ — 分析
+
+| 编号 | 文档 | 内容 |
+|---|---|---|
+| 06 | [GPU-hours 估算](analysis/06-gpu-hours.md) | 三口径 × 两种训练量；含三篇论文自己声明的集群规模 |
+| 10 | [**微基准与折扣系数**](analysis/10-microbench-discount.md) | 六家芯片实测 bf16/FP16/带宽 → 折扣系数（含/不含 FP32 两口径）；**验收判定的核心** |
+| 13 | [**拖累算子清单**](analysis/13-bottleneck-ops.md) | 按"占差距的比例"排序，含 kernel 名与调用次数，交给算子适配方 |
+| 11 | [给厂商的问题清单](analysis/11-vendor-questions.md) | 量化后的剩余瓶颈 + 复现脚本 + 已排除方向 |
+
+### acceptance/ — 验收
+
+| 编号 | 文档 | 内容 |
+|---|---|---|
+| **17** | [**验收条款清单**](acceptance/17-acceptance-checklist.md) | docx 原文逐条对照：硬性要求、**系数只有算法建议没有数值**、§4.3 验收方自认预训练做不到、我们 6 项达成情况与 4 个待确认问题 |
 
 > ⚠️ **训练吞吐（07-09）与推理吞吐（14）是两个口径，不要混比。**
 > 训练含反向传播与优化器，推理只含前向。同一平台同一模型二者可差 3-4 倍
@@ -55,7 +92,7 @@
 > **T²-Ranking test**（16,740 query，1 正 + 15 负）与 **MSCOCO 5k**。
 > 指标同名但数据集不同 → **绝对值不能和论文表比，只能做三平台横向对照**。
 >
-> **FlagGems 现状（两平台都已实测，详见 [12](12-flaggems-integration.md)）**：
+> **FlagGems 现状（两平台都已实测，详见 [12](training/12-flaggems-integration.md)）**：
 > - 配置开关 `train.hardware.use_flaggems` **以前是死配置**（只写环境变量、
 >   无人读取），现已接通并由 `flagscale/train/utils/flaggems.py` 读取。
 > - 昆仑芯（flag_gems 5.4.0 已装）：**10 个里 9 个更慢**（`sum` 0.03×、
@@ -66,7 +103,7 @@
 >   `nll_loss` launch failure）。
 > - PPU（flag_gems 5.4.0 已装）：**13 个里 12 个更慢，GEMM 持平 0.99×**。
 > - **结论：换 FlagGems 不是提速路径。**拖累算子必须由厂商在原生 kernel 层解决，
->   名单见 [13](13-bottleneck-ops.md)。
+>   名单见 [13](analysis/13-bottleneck-ops.md)。
 > - **所以本文档所有吞吐数字都是 `use_flaggems=false` 的基线。**
 >
 > **优化目标必须按真实配置的整步 profiler 归因**（微基准和小 batch 外推都会给出
@@ -173,7 +210,7 @@ CLIP —— 主指标 **R@1**（论文无 nDCG），双向一致**大幅提升**
 指标已能覆盖论文主指标（nDCG 于 2026-10-29 加入）。**真正的缺口是候选池**
 （16 vs 全语料），那个要改评测协议，不只是加指标。
 
-详见 [05-gaps.md](05-gaps.md)。
+详见 [05-gaps.md](papers/05-gaps.md)。
 
 ## 吞吐（样本/s，含波动区间）
 
@@ -203,7 +240,7 @@ wandb 不可用的（A100 全部 + PPU 的 BGE），用同一份 conf 在原机�
 >
 > 重算：2,020 步 / 33,912 s = 16.8 s/步 → 128/16.8 = **7.62 对/s**；
 > 历史 run 全程 11,440 步 × 128 对 / 199,800 s = **7.31 对/s**。
-> 详见 [07-a100.md](07-a100.md)。
+> 详见 [07-a100.md](results/07-a100.md)。
 
 > ⚠️ **每步 global batch 两平台不同，算吞吐必须换口径。**
 >
@@ -224,7 +261,7 @@ wandb 不可用的（A100 全部 + PPU 的 BGE），用同一份 conf 在原机�
 >
 > **唯一可比的是「对/s」**，因为 batch 大小已经被除掉了。
 > 本文所有跨平台吞吐比较都已换算成对/s；排 GPU-hours 和工期同样用它。
-> 见 [08-kunlunxin.md](08-kunlunxin.md)。
+> 见 [08-kunlunxin.md](results/08-kunlunxin.md)。
 
 > **A100 的波动区间是本轮新测的**（`examples/retrieval/measure_throughput.py`）。
 > 原始 run 早于 `WANDB_API_KEY` 生效、wandb 离线且日志没有每步时间戳，
@@ -255,7 +292,7 @@ wandb 不可用的（A100 全部 + PPU 的 BGE），用同一份 conf 在原机�
 > 论文要 top-100 候选 + nDCG@10）；两个国产平台则是 checkpoint 问题/训练未完成。
 > 这一项目前**无法给出达标判定**，不能拿配对准确率充数。
 > 系数取实测微基准（不含 FP32）：昆仑芯 **1.321**、PPU **0.711**，
-> 详见 [10-microbench-discount.md](10-microbench-discount.md)。
+> 详见 [10-microbench-discount.md](analysis/10-microbench-discount.md)。
 
 ### 原始比值（不乘折扣系数，直接对 A100）
 
@@ -313,7 +350,7 @@ PPU 的 BGE/CLIP 在 56-58% 之间，reranker 只有 A100 的 51%。
 3. 之前按"系数=1"的保守判定（三项全不达标）会**低估国产芯片**——
    昆仑芯 bf16 GEMM 实测是 A100 的 127%、带宽 138%。
 
-详见 [07](07-a100.md) / [08](08-kunlunxin.md) / [09](09-ppu.md)。
+详见 [07](results/07-a100.md) / [08](results/08-kunlunxin.md) / [09](results/09-ppu.md)。
 
 ## 一个容易混淆的点：kernel 慢 ≠ 吞吐慢
 

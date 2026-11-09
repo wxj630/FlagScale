@@ -70,7 +70,7 @@ docx §4.2 原文（#156-159）：
 > 模型在国产芯片上的训练、吞吐率 ≧ A100 上的训练、吞吐率 × **微基准折扣系数** × 0.8
 
 **注意**：docx 明确要求**训练和推理两个吞吐率都要**。我们此前只测了训练，
-2026-11-05 才补上推理（见 [14-inference-throughput.md](14-inference-throughput.md)）。
+2026-11-05 才补上推理（见 [14-inference-throughput.md](../results/14-inference-throughput.md)）。
 
 ---
 
@@ -108,7 +108,7 @@ docx §4.2 原文（#160-163）：
 
 > **必须主动向验收方确认口径**，理由：八项判定里有一项（PPU CLIP）
 > 会随口径翻转结论——口径 B 102.1%（达标）vs 口径 A 80.8%（不达标）。
-> 详见 [10-microbench-discount.md](10-microbench-discount.md) §一·五。
+> 详见 [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·五。
 
 ---
 
@@ -147,7 +147,7 @@ docx 原文（#166-168）：
 > 基本只汇报最终 bench 效果，预训练的 bench 效果没有汇报所以也无从比对
 
 > ✅ 这解释了为什么我们的范围是**微调**而非预训练，也解释了
-> [06-gpu-hours.md](06-gpu-hours.md) 里那些"论文全量训练量"估算只是参考，
+> [06-gpu-hours.md](../analysis/06-gpu-hours.md) 里那些"论文全量训练量"估算只是参考，
 > 不是验收要求。
 
 ---

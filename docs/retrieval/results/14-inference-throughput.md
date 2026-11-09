@@ -73,7 +73,7 @@ docx §4.2 只给了算法、没给数值，所以系数有**两套来源**，�
 > 它全部高于我们实测值（昆仑芯 BF16 +47%、PPU +67%、昇腾 +9%），
 > 符合"厂商宣称值 vs 实测值"的关系——A100 自己的实测 MFU 也只有宣称的 82-85%。
 >
-> 详见 [10-microbench-discount.md](10-microbench-discount.md) §一·五 / §一·六。
+> 详见 [10-microbench-discount.md](../analysis/10-microbench-discount.md) §一·五 / §一·六。
 
 ### 训练吞吐
 
