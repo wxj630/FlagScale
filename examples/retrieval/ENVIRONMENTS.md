@@ -1,5 +1,18 @@
 # Runtime profiles
 
+> ⚠️ **这份文档已过时（2026-11-09）。** 下面写的 "PyTorch 2.10.0+cpu plus
+> Torch-FL CUDA boxing" 与实测不符：A100 实际跑的是 **torch 2.11.0+cu128
+> 原生 CUDA，且没装 torch_fl**（import 直接 ModuleNotFoundError）。
+>
+> **准确的环境清单与脚本用法见**
+> [`docs/retrieval/training/18-environment-and-scripts.md`](../../docs/retrieval/training/18-environment-and-scripts.md)。
+> 那份按平台列了 Python / torch / transformers 的实测版本，以及各平台的
+> Python 入口和路径约定。
+>
+> 本文保留的是"为什么要按平台分环境"的设计说明，仍然有效：
+> torch-fl 的 wheel 与特定 torch 次版本和厂商 SDK 绑定，不能混装。
+
+
 The retrieval entrypoint separates model code from the hardware runtime. Use
 one environment per hardware profile; do not install every FlagOS backend into
 the same runtime.

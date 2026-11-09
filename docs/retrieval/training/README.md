@@ -5,6 +5,7 @@
 
 | 文档 | 用途 |
 |---|---|
+| [**18-environment-and-scripts**](18-environment-and-scripts.md) | **换机器上手手册**：四平台环境实况、Python 入口、路径约定、训练/评测/分析脚本用法 |
 | [15-launch-commands](15-launch-commands.md) | **各芯片的启动命令原文**。每台机器只有一条验证过的路径，附每个踩过的坑与报错 |
 | [12-flaggems-integration](12-flaggems-integration.md) | FlagGems 开关怎么用、怎么验证、为什么实测还是不快 |
 
