@@ -30,6 +30,49 @@
 "把语义压成一个向量、按对比学习排序"；阶段 2 才扩展成"一个模型三种检索方式"，
 并用三路集成结果反过来蒸馏自己。
 
+#### 三路的启用时间：阶段 1 **只有 dense**
+
+论文原文（`main.tex:350`）：
+
+> *"...is pre-trained with the massive unsupervised data, **where only the dense
+> retrieval is trained** in the basic form of contrastive learning."*
+
+**`where only the dense retrieval is trained` 是定语从句，直接修饰预训练。**
+没有歧义。
+
+| | 阶段 1 无监督预训练 | 阶段 2 统一微调 |
+|---|---|---|
+| **Dense**（`[CLS]`）| ✅ **唯一训练的一路** | ✅ 继续 |
+| **Sparse**（`W_lex`，d×1）| ❌ **不存在** | ✅ **才初始化** |
+| **Multi-vector**（`W_mul`，d×d）| ❌ **不存在** | ✅ **才初始化** |
+| 自知识蒸馏 | ❌ | ✅ |
+| 损失 | 单个 InfoNCE | 三路 + 集成 + 蒸馏 |
+
+**一个能直接佐证的细节**：论文解释 `0.3 / 0.1` 这两个权重的来由时说——
+
+> *"The **random initialization** of `W_lex` led to poor `s_lex` accuracy and high
+> `L_lex` at the beginning of the training."*
+
+`W_lex` 是**随机初始化**的。它若参与过阶段 1，就不可能是随机初始化。
+
+##### 结构演进
+
+```
+阶段 0  RetroMAE       encoder（24 层 XLM-R）
+                        ↓
+阶段 1  无监督预训       encoder
+                        └ [CLS] → dense 打分              ← 只有这一条路
+                        ↓
+阶段 2  统一微调         encoder（继续训）
+                        ├ [CLS]              → dense      （已有）
+                        ├ + W_lex (d×1, 新)  → sparse     （新增）
+                        └ + W_mul (d×d, 新)  → colbert    （新增）
+                        ＋ 自知识蒸馏
+```
+
+**阶段 1 建立的是「encoder + `[CLS]`」这套基础设施**，阶段 2 在其上加两个新投影头。
+这也解释了为什么阶段 1 的 1.2B 数据对三种检索方式都有帮助——**三者共享同一个 encoder**。
+
 ### 三个阶段各自贡献多少（论文表 3，MIRACL dev nDCG@10）
 
 | 训练方式 | MIRACL nDCG@10 |
@@ -438,6 +481,79 @@ s_mul = (1/N) · Σ_{i=1}^{N} max_{j=1}^{M} (E_q[i] · E_p[j])
 
 所以论文明确说 *"the multi-vector method can be exempted from this step due to its
 **heavy cost**"*——**只重排 dense 的 top-200，不参与初检**。
+
+#### 自知识蒸馏到底在做什么（阶段 2 的核心）
+
+**要解决的问题**：三路的训练目标会**互相冲突**。论文原文（`main.tex:328`）：
+
+> *"The training objectives of different retrieval methods can be **mutually
+> conflicting**... the **native multi-objective training can be unfavorable** to
+> the embedding's quality."*
+
+举例：query「iPhone 电池不耐用」→ dense 想让「苹果续航差」得分高，而 sparse 只看字面
+（"iPhone" ≠ "苹果"）几乎不给分。**两个梯度在同一组 encoder 权重上互相拉扯。**
+
+**解法：三路互为教师。** 三路是异构预测器，按 ensemble 原理集成后比任一路都强，
+拿集成分数当教师来教每一路。
+
+```
+（1）集成分数 = 教师
+    s_inter = w1·s_dense + w2·s_lex + w3·s_mul
+
+（2）不加蒸馏的损失（各自对比 + 集成对比）
+    L = (λ1·L_dense + λ2·L_lex + λ3·L_mul + L_inter) / 4
+
+（3）蒸馏损失：让每一路去拟合教师
+    L'_* = -p(s_inter) · log p(s_*)
+    L'  = (λ1·L'_dense + λ2·L'_lex + λ3·L'_mul) / 3
+
+最终  L_final = (L + L') / 2
+```
+
+`L'_*` 是**软标签交叉熵**：teacher 是 `s_inter` 的概率分布，student 是每一路自己的
+分布。**每一路都被拉向「三路共识」。**
+
+##### 代码实现比论文多了三个细节
+
+源码 `FlagEmbedding/finetune/embedder/encoder_only/m3/modeling.py:461-470`：
+
+```python
+if self.use_self_distill and self.step > self.self_distill_start_step:
+    self_teacher_targets = torch.softmax(ensemble_scores.detach(), dim=-1)  # ← stop-grad
+
+    dense_self_distill_loss   = kl_div(self_teacher_targets, dense_scores)
+    sparse_self_distill_loss  = kl_div(self_teacher_targets, sparse_scores)
+    colbert_self_distill_loss = kl_div(self_teacher_targets, colbert_scores)
+
+    loss += (dense + 0.1*sparse + colbert) / 3
+    loss = loss / 2
+```
+
+| 细节 | 论文没写、代码里有 | 为什么必须这样 |
+|---|---|---|
+| **teacher 用 `.detach()`** | 教师信号**不回传梯度** | 否则教师会为了迁就学生而退化（教师学生一起塌），蒸馏失效 |
+| **`self_distill_start_step`** | 蒸馏**不从第 0 步开始**，先 warm-up（附录说 ~6,000 步）| `W_lex` 是随机初始化，初期 `s_lex` 是纯噪声，拿噪声当教师会把 dense 带坏 |
+| **损失项是 KL 散度** | 论文写 `-p·log p`，代码用 `kl_div` | — |
+
+##### 权重为什么是 `1 / 0.3 / 1`（λ 为 `1 / 0.1 / 1`）
+
+| 权重 | 值 | 原因 |
+|---|---|---|
+| `w1` dense | 1 | 主力 |
+| `w2` sparse | **0.3** | 精度低、噪声大，不能等权 |
+| `w3` multi-vec | 1 | 精度高但成本高 |
+| `λ2` sparse 损失权重 | **0.1** | 比其他的低 10 倍 |
+
+**sparse 在教师和学生两侧都被降权**——它初始噪声最大，等权会污染集成信号。
+
+##### ⚠️ 为什么「只做 dense」时不存在蒸馏
+
+`s_inter = w1·s_dense + 0·s_lex + 0·s_mul = w1·s_dense`，
+于是 `L'_dense = -p(w1·s_dense)·log p(s_dense)`——**自己教自己，恒等于零作用**。
+
+**所以蒸馏是纯 dense 拿不到的额外收益。** 这是"我们只做 Dense 对应论文 69.2、
+不是 M3 All 的 71.5"的深层原因，不是简单的"少了两路打分"——**少的是让三路互相
+优化的那套机制**。
 
 #### 我们只用 Dense（这是刻意的，不是遗漏）
 
