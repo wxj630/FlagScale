@@ -1,0 +1,35 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/flagos-retrieval-ckpts/continual/rr_msmarco/checkpoint-epoch-1",
+  "split": "test",
+  "samples": 1000,
+  "inference": {
+    "items_scored": 16000,
+    "model_seconds": 987.035,
+    "samples_per_s": 16.21,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "count": 1000,
+    "recall@1": 0.625,
+    "recall@5": 0.977,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.7770119047619048,
+    "mean_rank": 1.682,
+    "ndcg@1": 0.625,
+    "ndcg@5": 0.8249577690204308,
+    "ndcg@10": 0.8330819127625912,
+    "ndcg@20": 0.8330819127625912,
+    "hit@1": 0.625,
+    "hit@5": 0.977,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

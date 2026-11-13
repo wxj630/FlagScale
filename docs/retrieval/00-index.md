@@ -38,6 +38,7 @@ docs/retrieval/
 | 编号 | 文档 | 内容 |
 |---|---|---|
 | **21** | [**A100 基准代码讲解**](training/21-a100-code-walkthrough.md) | **逐模块讲解**：模型适配器 / 数据管线 / 训练循环 / 存盘与续训 / 评测。每条设计都带"为什么"和踩过的坑（FSDP2 存盘三缺陷、split 按 query 分组、sync 选择性关闭）|
+| **22** | [**继续预训练数据与流程**](training/22-continued-pretraining.md) | **与验收微调的区别**：只有正例对、负例来自 batch 内、训练与评测必须换语料。三个 ModelScope 数据集（LCQMC / Flickr30K / MS MARCO）的字段、大小、转换步骤，以及 ModelScope **按连接限速**导致的下载需并发（实测 28×）|
 | **19** | [**适配方案与工作量说明**](training/19-adaptation-report.md) | **给甲方**：A100 标准流程、四平台适配方案（各自的运行时缺陷与绕法）、工作量汇总（+2,824 行、13 个缺陷、31 h 损失）、遗留问题 |
 | **18** | [**训练环境与脚本手册**](training/18-environment-and-scripts.md) | **换机器照着做**：四平台环境实况（torch 2.9/2.10/2.11 各不相同）、Python 入口、路径软链、训练/评测/分析脚本用法、上手检查清单 |
 | 15 | [**各芯片启动命令**](training/15-launch-commands.md) | **每台机器只有一条验证过的启动路径**。A100 / 昆仑芯 / PPU 的命令原文、必需环境变量、每个踩过的坑与报错原文。PPU 必须进容器，卡号在容器内重新编号 |
@@ -51,7 +52,7 @@ docs/retrieval/
 | **08** | [**昆仑芯 P800**](results/08-kunlunxin.md) | 精度 99.4-100.3%；吞吐与 A100 的差距归因（GELU 25×、胶水算子）；**reranker 收敛问题排查全过程** |
 | **09** | [**PPU ZW810E**](results/09-ppu.md) | 精度 99.9-100.1%（CLIP 已重训复核）；吞吐 CLIP 达标、BGE/Reranker 未达 |
 | **16** | [**昇腾 910C**](results/16-ascend.md) | 精度 BGE/CLIP ✅；慢算子是 RMSNorm/LayerNorm/激活，**GEMM 反而比 A100 快** |
-| **14** | [**推理吞吐（四平台）**](results/14-inference-throughput.md) | **只计模型前向**。A100 395.2 / 昆仑芯 160.9 / 昇腾 155.2 / PPU 74.1（BGE） |
+| **14** | [**推理吞吐（四平台汇总）**](results/14-inference-throughput.md) | **只计模型前向**的跨平台深挖（口径、两套系数、档位差异）。**汇报请用各芯片文档里的「吞吐总表」，训练+推理已经并排**：[07 §三·五](results/07-a100.md) · [08 §零·五](results/08-kunlunxin.md) · [09 §零·五](results/09-ppu.md) · [16 §零·五](results/16-ascend.md) |
 | — | [data/](results/data/) | 实测产物：`inference/*.json`（推理吞吐）、`op-micro/*.json`（算子微基准）、`ppu_clip_*.json`（CLIP 评测） |
 
 ### analysis/ — 分析
@@ -70,7 +71,12 @@ docs/retrieval/
 |---|---|---|
 | **17** | [**验收条款清单**](acceptance/17-acceptance-checklist.md) | docx 原文逐条对照：硬性要求、**系数只有算法建议没有数值**、§4.3 验收方自认预训练做不到、我们 6 项达成情况与 4 个待确认问题 |
 
-> ⚠️ **训练吞吐（07-09）与推理吞吐（14）是两个口径，不要混比。**
+> ⚠️ **训练吞吐与推理吞吐是两个口径，不要跨列比较**（推理是训练的 2-4 倍属正常）。
+> **但汇报时两者要相邻**：每块芯片的文档里都有一张「吞吐总表」，
+> 训练与推理并排、一个模型一行 ——
+> [07 §三·五](results/07-a100.md) / [08 §零·五](results/08-kunlunxin.md) /
+> [09 §零·五](results/09-ppu.md) / [16 §零·五](results/16-ascend.md)。
+> 跨平台的方法论与两套系数推导在 [14](results/14-inference-throughput.md)。
 > 训练含反向传播与优化器，推理只含前向。同一平台同一模型二者可差 3-4 倍
 > （昆仑芯 BGE：训练 54.0 → 推理 160.9，**2.98×**）。
 

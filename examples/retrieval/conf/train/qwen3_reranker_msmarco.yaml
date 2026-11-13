@@ -1,0 +1,66 @@
+# Continued pretraining · Qwen3-Reranker-8B on MS MARCO.
+#
+# **Continued pretraining, not the acceptance fine-tune.**  The acceptance runs
+# train and evaluate on the same T2Ranking corpus, so their numbers measure
+# in-distribution fit.  This config instead trains on MS MARCO and evaluates on
+# T2Ranking, which is the only way to see whether the reranker transfers.
+#
+# Data: mteb/MSMARCO — 3.4 GB corpus.jsonl + queries.jsonl + qrels/train.jsonl.
+# MTEB publishes it as three tables, not triplets, so run
+#     python tools/mteb_to_triplets.py \
+#         --dataset-dir /flagos-retrieval-datasets/msmarco \
+#         --out /flagos-retrieval-datasets/msmarco/triplets --max-queries 20000
+# once, then point `data.path` at the output.
+#
+# Negatives are random, not mined.  That makes this a weaker signal than the
+# paper's hard-negative recipe; documented as a limitation, not hidden.
+name: qwen3_reranker_msmarco
+task: reranker
+seed: 42
+batch_size: 16
+gradient_accumulation_steps: 1
+epochs: 1
+log_every: 10
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: qwen3_reranker
+  model_path: /flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
+  max_length: 512
+  torch_dtype: bf16
+  freeze_backbone: false
+  # Same native yes/no scoring as the acceptance config: a random scalar head
+  # throws away the pretrained reranking ability.
+  use_score_head: false
+  gradient_checkpointing: true
+
+data:
+  path: /flagos-retrieval-datasets/msmarco/triplets
+  validation_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  # Evaluated on T2Ranking — disjoint from MS MARCO, so this measures transfer
+  # rather than memorisation.
+  test_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  train_split: train
+  validation_split: validation
+  test_split: test
+  eval_max_samples: 256
+  num_negatives: 1
+  # Both the MS MARCO triplets and the T2Ranking evaluation set are the triplet
+  # parquet layout, so no per-split format override is needed here.
+  validation_format: triplet
+  test_format: triplet
+  split_modulo: 20
+  shuffle_buffer: 20000
+  length_sort_window: 256
+  max_samples: null
+
+optimizer:
+  name: adamw
+  # Same rate as the acceptance config.  Lowering it here would confound the
+  # data swap with a hyperparameter change.
+  lr: 1.0e-5
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0

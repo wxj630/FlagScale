@@ -368,7 +368,14 @@ python examples/retrieval/evaluate_retrieval.py \
 ```
 
 **单进程设计**（不需要 torchrun）：一次评一个模型，跑完退出。
-8B reranker 单卡放不下时这条路走不通（昆仑芯/PPU 的缺口）。
+
+**8B reranker 用这条路评测是可行的**——实测在 PPU 96 GB 上单卡跑完了全量
+16,740 query（14.55 对/s），在 A100 80 GB 上也一样。
+**单卡装不下的是"训练"**：fp32 优化器状态要 131 GB，所以训练必须 FSDP2 多卡；
+**纯前向评测的显存需求小得多**，batch 4 就够。
+
+> 早期文档写"8B 单卡放不下、评测走不通"，是把训练与评测的显存需求混了。
+> 那是错的，见 [14-inference-throughput.md](../results/14-inference-throughput.md) §四。
 
 ### 8.2 两种评测协议
 

@@ -1,0 +1,35 @@
+{
+  "model_type": "bge_m3",
+  "task": "embedding",
+  "checkpoint": "/flagos-retrieval-models/bge-m3/bge-m3",
+  "split": "all",
+  "samples": 4000,
+  "inference": {
+    "items_scored": 64000,
+    "model_seconds": 26.988,
+    "samples_per_s": 2371.423,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "count": 4000,
+    "recall@1": 0.999,
+    "recall@5": 1.0,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.9994583333333333,
+    "mean_rank": 1.00125,
+    "ndcg@1": 0.999,
+    "ndcg@5": 0.9995981973151786,
+    "ndcg@10": 0.9995981973151786,
+    "ndcg@20": 0.9995981973151786,
+    "hit@1": 0.999,
+    "hit@5": 1.0,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

@@ -1,0 +1,65 @@
+# Continued pretraining · CLIP ViT-L/14 on Flickr30K.
+#
+# **Continued pretraining, not evaluation fine-tuning.**  CLIP's paper has no
+# fine-tuning stage; this run checks whether the already-aligned image/text space
+# keeps improving on a small, clean caption corpus.  Loss is unchanged
+# (`clip_loss`, symmetric in-batch contrastive), and no extra negatives are
+# introduced.
+#
+# Data: lmms-lab/Flickr30K — 31,783 images, 5 captions each, WebDataset-style
+# **parquet** with a raw image column and a caption column.  Our loader reads the
+# tar packaging because the COCO dump happened to ship as tar; that was never a
+# requirement, so `format: parquet` selects ClipParquetDataset instead of asking
+# for a re-pack.
+#
+# Two Flickr30K specifics the loader handles:
+#   * five captions share one image, so the split buckets on the **caption**
+#     (rows with the same caption always land on the same side);
+#   * `lmms-lab/Flickr30K` publishes only a `test` split, so train/validation are
+#     carved out of it by the same split_modulo rule the other datasets use.
+name: clip_vit_large_flickr30k
+task: clip
+seed: 42
+batch_size: 64
+gradient_accumulation_steps: 1
+epochs: 1
+log_every: 20
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: clip_vit_large
+  model_path: /flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14
+  max_length: 77
+  torch_dtype: bf16
+  freeze_backbone: false
+
+data:
+  path: /flagos-retrieval-datasets/flickr30k
+  validation_path: /flagos-retrieval-datasets/flickr30k
+  # Evaluated on the acceptance set, not on Flickr30K: the training rows come
+  # from the same corpus, so scoring it would measure memorisation.
+  test_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
+  format: parquet
+  image_column: image
+  text_column: caption
+  # Train/validation are Flickr30K parquet; the evaluation set is the COCO
+  # WebDataset tar.  Without per-split formats the parquet reader is pointed at
+  # a directory of tars and yields nothing.
+  validation_format: parquet
+  test_format: tar
+  train_split: train
+  validation_split: validation
+  test_split: all
+  eval_max_samples: 256
+  split_modulo: 20
+  shuffle_buffer: 2000
+  num_workers: 6
+  max_samples: null
+
+optimizer:
+  lr: 1.0e-7
+  weight_decay: 0.01
+  lr_decay_style: cosine
+  min_lr: 1.0e-8
+  warmup_steps: 100
+  max_grad_norm: 1.0

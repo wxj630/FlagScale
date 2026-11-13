@@ -1,0 +1,47 @@
+{
+  "model_type": "clip_vit_large",
+  "task": "clip",
+  "checkpoint": "/flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14",
+  "split": "all",
+  "samples": 5000,
+  "inference": {
+    "items_scored": 10000,
+    "model_seconds": 157.214,
+    "samples_per_s": 63.607,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "text_to_image": {
+      "count": 5000,
+      "recall@1": 0.5446,
+      "recall@5": 0.7794,
+      "recall@10": 0.8538,
+      "mrr": 0.6527037374059633,
+      "mean_rank": 6.4904,
+      "ndcg@1": 0.5446,
+      "ndcg@5": 0.6716971514251708,
+      "ndcg@10": 0.6958220898767082,
+      "hit@1": 0.5446,
+      "hit@5": 0.7794,
+      "hit@10": 0.8538
+    },
+    "image_to_text": {
+      "count": 5000,
+      "recall@1": 0.6216,
+      "recall@5": 0.8464,
+      "recall@10": 0.9086,
+      "mrr": 0.7216881448614921,
+      "mean_rank": 4.5682,
+      "ndcg@1": 0.6216,
+      "ndcg@5": 0.7433823317419913,
+      "ndcg@10": 0.7636539400529073,
+      "hit@1": 0.6216,
+      "hit@5": 0.8464,
+      "hit@10": 0.9086
+    }
+  }
+}

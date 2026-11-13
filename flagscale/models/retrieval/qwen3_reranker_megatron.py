@@ -397,5 +397,158 @@ def _convert_main(argv: list[str] | None = None) -> None:
         print(f"stage{pp_rank}: {len(stage)} tensors, {total / 1e9:.2f}B params -> {destination}")
 
 
+def _merge_stages(stages: list[dict[str, torch.Tensor]], hf: dict, pp_size: int) -> dict:
+    """Fold ``pp_size`` Megatron stage dicts into one HF ``state_dict``.
+
+    Each stage is exported with :func:`megatron_to_hf_state` and the pieces are
+    merged.  The layer ranges are disjoint by construction, so a key appearing
+    twice means the stage split is inconsistent and this raises instead of
+    letting one stage silently overwrite another.
+    """
+
+    merged: dict[str, torch.Tensor] = {}
+    for pp_rank, stage in enumerate(stages):
+        for name, tensor in megatron_to_hf_state(
+            stage, hf, pp_size=pp_size, pp_rank=pp_rank
+        ).items():
+            if name in merged:
+                raise RuntimeError(
+                    f"duplicate HF tensor {name!r} from stage {pp_rank}; "
+                    "the pipeline split does not partition the layers"
+                )
+            merged[name] = tensor
+
+    # `megatron_to_hf_state` derives `per_stage = num_layers // pp_size` and
+    # walks `range(first, first + per_stage)`.  When pp_size does not divide
+    # num_layers that integer division silently DROPS the remainder: 40 layers
+    # over 3 stages exports 13 each, and layer 39 is missing from every stage,
+    # so the merged model loads with `strict=False` and scores nonsense.  The
+    # Qwen3 8B has 36 layers and divides evenly by 1/2/4/6, which is why this
+    # never fired in the runs we shipped -- check it rather than rely on that.
+    if hf["num_hidden_layers"] % pp_size != 0:
+        raise RuntimeError(
+            f"num_hidden_layers={hf['num_hidden_layers']} is not divisible by "
+            f"pp_size={pp_size}: the export would drop "
+            f"{hf['num_hidden_layers'] % pp_size} layer(s) silently"
+        )
+    expected = {f"model.layers.{i}" for i in range(hf["num_hidden_layers"])}
+    # `model.layers.<N>.<rest...>` -> `model.layers.<N>`; rsplit would leave the
+    # submodule name attached and every layer would look unknown.
+    produced = {
+        ".".join(name.split(".")[:3])
+        for name in merged
+        if name.startswith("model.layers.")
+    }
+    if produced != expected:
+        missing = sorted(expected - produced)[:4]
+        extra = sorted(produced - expected)[:4]
+        raise RuntimeError(
+            f"export produced layers {len(produced)} of {len(expected)}; "
+            f"missing={missing} unexpected={extra}"
+        )
+    return merged
+
+
+def _export_main(argv: list[str] | None = None) -> None:
+    """``python -m flagscale.models.retrieval.qwen3_reranker_megatron export``.
+
+    Turn a trained ``checkpoint-epoch-N/`` (which holds one ``stage{K}.pt`` per
+    pipeline rank) back into a plain HF directory, so the **same**
+    ``examples/retrieval/evaluate_retrieval.py`` that evaluates A100/PPU
+    checkpoints can score it.  Without this the Megatron path produces weights
+    nothing else can read, and its trained metrics are unobtainable.
+
+    The HF config and tokenizer are copied from ``--model`` (the original
+    release) because the stage files contain weights only.
+    """
+
+    import argparse
+    import shutil
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--checkpoint",
+        required=True,
+        help="trained checkpoint dir holding stage0.pt .. stage{N-1}.pt",
+    )
+    parser.add_argument("--model", required=True, help="original HF release (config + tokenizer)")
+    parser.add_argument("--pp", type=int, default=4, help="pipeline model parallel size")
+    parser.add_argument("--out", required=True, help="output HF directory")
+    parser.add_argument(
+        "--dtype",
+        default="bf16",
+        choices=("bf16", "fp32"),
+        help=(
+            "dtype to write the exported weights in. bf16 (default) matches both "
+            "the release weights and the training precision; fp32 doubles the "
+            "file to 32.7 GB and single-card evaluation of the 8B then runs out "
+            "of memory partway through the split."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    checkpoint_dir = Path(args.checkpoint)
+    hf = read_hf_config(args.model)
+
+    stages = []
+    for pp_rank in range(args.pp):
+        path = checkpoint_dir / f"stage{pp_rank}.pt"
+        if not path.is_file():
+            raise FileNotFoundError(f"missing {path}")
+        state = torch.load(path, map_location="cpu", weights_only=False)
+        stages.append(
+            {name: t for name, t in state.items() if isinstance(t, torch.Tensor)}
+        )
+        print(f"loaded {path} ({len(stages[-1])} tensors)")
+
+    merged = _merge_stages(stages, hf, args.pp)
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy the non-weight files the evaluator needs.  safetensors shards are
+    # deliberately skipped: the trained weights replace them wholesale, and
+    # leaving the originals behind makes `from_pretrained` load the BASE model.
+    for source in sorted(Path(args.model).iterdir()):
+        if not source.is_file():
+            continue
+        if source.suffix == ".safetensors" or source.name.endswith(".safetensors.index.json"):
+            continue
+        shutil.copy2(source, out_dir / source.name)
+
+    from safetensors.torch import save_file
+
+    target_dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+    # `save_file` refuses shared storage, and `torch.chunk`-derived tensors
+    # (gate/up, q/k/v) are views into one allocation, so materialise a copy.
+    payload = {
+        name: tensor.to(target_dtype).contiguous().clone()
+        for name, tensor in merged.items()
+    }
+    save_file(payload, out_dir / "model.safetensors")
+
+    print(
+        f"wrote {out_dir / 'model.safetensors'}: {len(merged)} tensors, "
+        f"{sum(t.numel() for t in merged.values()) / 1e9:.2f}B params"
+    )
+
+
+def _main(argv: list[str] | None = None) -> None:
+    """Dispatch ``convert`` (HF -> stages) and ``export`` (stages -> HF)."""
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] not in {"convert", "export"}:
+        raise SystemExit(
+            "usage: python -m flagscale.models.retrieval.qwen3_reranker_megatron "
+            "{convert|export} --help"
+        )
+    command, rest = argv[0], argv[1:]
+    if command == "convert":
+        _convert_main(rest)
+    else:
+        _export_main(rest)
+
+
 if __name__ == "__main__":
-    _convert_main()
+    _main()

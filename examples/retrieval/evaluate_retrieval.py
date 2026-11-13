@@ -235,6 +235,32 @@ def _inference_items(task: str, rows: int, negative_keys: list[str]) -> int:
     return rows * (1 + len(negative_keys))
 
 
+def _platform_block(device_arg: str) -> dict:
+    """Which accelerator produced this result.
+
+    Every number in these JSONs is compared across CUDA / Kunlunxin / PPU /
+    Ascend, and until this block existed the only record of *which* chip ran was
+    the file's path -- which is not part of the artifact and cannot survive a
+    copy.  AGENTS.md requires results to be tagged by platform, so record it
+    where the numbers live.
+
+    The device string is what the caller passed (``cuda`` / ``flagos`` / ``npu``),
+    which is the meaningful distinction: ``cuda`` on Kunlunxin is the vendor
+    shim, not an NVIDIA card.
+    """
+
+    block = {"device": device_arg}
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            block["device_name"] = torch.cuda.get_device_name(0)
+    except Exception:
+        # A missing name must never fail an evaluation that otherwise ran fine.
+        pass
+    return block
+
+
 def _inference_block(clock: "InferenceClock", items: int) -> dict:
     """Model-only timing, ready to drop into the result JSON.
 
@@ -610,6 +636,7 @@ def main() -> None:
             # 2 x samples; reported separately from the metric block because it
             # is a speed measurement, not a quality one.
             "inference": _inference_block(clock, 2 * samples),
+            "platform": _platform_block(args.device),
             "metrics": metrics,
         }
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -654,6 +681,7 @@ def main() -> None:
         "split": args.split,
         "samples": len(rows),
         "inference": _inference_block(clock, _inference_items(args.task, len(rows), negative_keys)),
+        "platform": _platform_block(args.device),
         "metrics": metrics,
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))

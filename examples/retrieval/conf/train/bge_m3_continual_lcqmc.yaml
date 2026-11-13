@@ -1,0 +1,67 @@
+# Continued pretraining · BGE-M3 on LCQMC sentence pairs.
+#
+# **Continued pretraining, not task fine-tuning.**  BGE-M3 already has its
+# retrieval ability; this run asks whether the encoder keeps improving when fed a
+# contrastive corpus in the same shape it was pretrained on.  The loss is
+# unchanged (`embedding_loss`, in-batch negatives), and no hard negatives are
+# supplied, so the difficulty comes only from the batch composition.
+#
+# Data: C-MTEB/LCQMC — 238,766 Chinese question pairs, 58% positive.
+# The reader drops the score==0 rows (see SentencePairDataset): keeping them
+# would teach the model to separate paraphrases.
+#
+# Deliberately NOT the T2Ranking triplets used for the acceptance runs.  Those
+# are also the evaluation set here, so training on them would report memorisation.
+name: bge_m3_continual_lcqmc
+task: embedding
+seed: 42
+batch_size: 32
+gradient_accumulation_steps: 1
+epochs: 1
+log_every: 20
+temperature: 0.05
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: bge_m3
+  model_path: /flagos-retrieval-models/bge-m3/bge-m3
+  max_length: 128
+  torch_dtype: bf16
+  freeze_backbone: false
+
+data:
+  path: /flagos-retrieval-datasets/lcqmc
+  validation_path: /flagos-retrieval-datasets/lcqmc
+  test_path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  # `format: pair` selects SentencePairDataset and renames
+  # sentence1/sentence2 -> anchor/positive.
+  format: pair
+  pair_columns: [sentence1, sentence2]
+  score_column: score
+  positive_value: 1.0
+  # The evaluation set is the T2Ranking triplet parquet, not a sentence-pair
+  # file, so it needs the triplet reader.  Without this the pair reader looks
+  # for `sentence1`, finds nothing, and evaluation dies with "empty dataset"
+  # after the whole epoch.
+  validation_format: pair
+  test_format: triplet
+  train_split: train
+  validation_split: validation
+  test_split: test
+  eval_max_samples: 512
+  num_negatives: 0
+  # Declared (as null) so `train.data.max_samples=N` can be overridden for a
+  # smoke test without Hydra refusing the key; the reader treats None as "all".
+  max_samples: null
+  split_modulo: 20
+  shuffle_buffer: 20000
+  length_sort_window: 256
+
+optimizer:
+  name: adamw
+  lr: 2.0e-5
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 100
+  weight_decay: 0.01
+  max_grad_norm: 1.0

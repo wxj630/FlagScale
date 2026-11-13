@@ -822,6 +822,25 @@ def _train_megatron(
         int(model_cfg.get("false_token_id", 2152)),
     )
 
+    # `master_dtype` is an FSDP2-only setting: MegatronPipelineTrainer builds its
+    # OptimizerConfig with params_dtype=bf16 unconditionally, so an fp32 request
+    # cannot be honoured on this path.
+    #
+    # It used to be accepted in silence, and every launch script passes
+    # `train.master_dtype=fp32` -- so the P800 PP=4 run trained bf16 parameters
+    # for 33 hours while the command line (and every reader of it) said fp32.
+    # That difference is the whole reason lr=1e-7 cannot move the weights, so
+    # letting the two disagree is worse than refusing to start.
+    requested_master_dtype = str(train_cfg.get("master_dtype", "bf16")).lower()
+    if requested_master_dtype not in {"bf16", "bfloat16"}:
+        raise RuntimeError(
+            "train.parallel=megatron keeps model parameters in bf16; "
+            f"train.master_dtype={requested_master_dtype} would be ignored. "
+            "Drop the override (or set it to bf16) -- silently training bf16 "
+            "weights under an fp32 label makes the checkpoint's precision "
+            "impossible to recover from the run record."
+        )
+
     batch_rows = int(train_cfg.get("batch_size", 1))
     grad_accum = int(train_cfg.get("gradient_accumulation_steps", 1))
 
@@ -1013,6 +1032,11 @@ def _train_megatron(
                 "warmup_steps": int(optim_cfg.get("warmup_steps", 0)),
                 "split_modulo": split_modulo,
                 "data_path": data_path,
+                # Recorded explicitly because this path cannot follow
+                # `master_dtype`: the parameters are bf16 regardless, and that
+                # is the fact every later comparison against FSDP2's fp32
+                # parameters depends on.
+                "param_dtype": "bfloat16",
             },
         }
         with (output_dir / "metrics.json").open("w", encoding="utf-8") as file:

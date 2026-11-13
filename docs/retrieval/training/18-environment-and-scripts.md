@@ -138,7 +138,9 @@ python -m flagscale.run \
 
 ### 6.1 `evaluate_retrieval.py`
 
-单进程，**不需要 torchrun**（8B 单卡放不下的情况除外）。
+单进程，**不需要 torchrun**。8B reranker 也是单卡评的
+（PPU 96 GB 上实测全量 16,740 query，14.55 对/s）——
+**单卡装不下的是训练，不是评测**：训练要 fp32 优化器状态 131 GB，评测只需 batch 4 的前向。
 
 ```bash
 python examples/retrieval/evaluate_retrieval.py \

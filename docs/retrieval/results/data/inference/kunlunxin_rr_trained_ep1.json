@@ -1,0 +1,31 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/data2/jiangxuhui/flagos-retrieval-ckpts/klx-pp4-3ep/hf-epoch-1",
+  "split": "test",
+  "samples": 300,
+  "inference": {
+    "items_scored": 4800,
+    "model_seconds": 225.758,
+    "samples_per_s": 21.262,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "count": 300,
+    "recall@1": 0.06333333333333334,
+    "recall@5": 0.36666666666666664,
+    "recall@10": 0.68,
+    "recall@20": 1.0,
+    "mrr": 0.22772096422096458,
+    "mean_rank": 7.956666666666667,
+    "ndcg@1": 0.06333333333333334,
+    "ndcg@5": 0.21264216065458533,
+    "ndcg@10": 0.3138679433462994,
+    "ndcg@20": 0.3964761650403553,
+    "hit@1": 0.06333333333333334,
+    "hit@5": 0.36666666666666664,
+    "hit@10": 0.68,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

@@ -8,7 +8,7 @@
 | [08-kunlunxin](08-kunlunxin.md) | 昆仑芯 P800 | 含 reranker 收敛问题的完整排查记录 |
 | [09-ppu](09-ppu.md) | PPU ZW810E | CLIP 已重训复核 |
 | [16-ascend](16-ascend.md) | 昇腾 910C | GEMM 比 A100 快，慢在小算子 |
-| [14-inference-throughput](14-inference-throughput.md) | 四平台 | **推理口径**（只计前向），与训练口径差 3-4 倍 |
+| [14-inference-throughput](14-inference-throughput.md) | 四平台 | 推理口径的**方法论**（两套系数推导、样本档位差异）。**逐平台的训练+推理并排表在各芯片文档的「吞吐总表」里** |
 
 ## data/ — 原始产物
 

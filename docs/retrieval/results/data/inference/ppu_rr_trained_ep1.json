@@ -1,0 +1,35 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/workspace/checkpoints/ppu-fp32master-3epoch/qwen3_reranker/checkpoint-epoch-1",
+  "split": "test",
+  "samples": 16740,
+  "inference": {
+    "items_scored": 267840,
+    "model_seconds": 18299.701,
+    "samples_per_s": 14.636,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "count": 16740,
+    "recall@1": 0.7602747909199522,
+    "recall@5": 0.9719832735961769,
+    "recall@10": 0.9949820788530466,
+    "recall@20": 1.0,
+    "mrr": 0.8519474996827147,
+    "mean_rank": 1.5513142174432497,
+    "ndcg@1": 0.7602747909199522,
+    "ndcg@5": 0.8796278451357603,
+    "ndcg@10": 0.8872481513642219,
+    "ndcg@20": 0.8885808646916783,
+    "hit@1": 0.7602747909199522,
+    "hit@5": 0.9719832735961769,
+    "hit@10": 0.9949820788530466,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  },
+  "platform": {
+    "device": "flagos",
+    "note": "platform block added manually: this run used the evaluator build from before _platform_block existed"
+  }
+}

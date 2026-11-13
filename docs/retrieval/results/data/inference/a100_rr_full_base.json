@@ -1,0 +1,31 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B",
+  "split": "test",
+  "samples": 16740,
+  "inference": {
+    "items_scored": 267840,
+    "model_seconds": 16992.401,
+    "samples_per_s": 15.762,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "count": 16740,
+    "recall@1": 0.733273596176822,
+    "recall@5": 0.9873954599761051,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.8407600130852819,
+    "mean_rank": 1.4836917562724015,
+    "ndcg@1": 0.733273596176822,
+    "ndcg@5": 0.8763595061077315,
+    "ndcg@10": 0.8808071918512005,
+    "ndcg@20": 0.8808071918512005,
+    "hit@1": 0.733273596176822,
+    "hit@5": 0.9873954599761051,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

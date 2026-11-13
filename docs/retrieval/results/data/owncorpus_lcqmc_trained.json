@@ -1,0 +1,35 @@
+{
+  "model_type": "bge_m3",
+  "task": "embedding",
+  "checkpoint": "/flagos-retrieval-ckpts/continual/bge_m3_lcqmc2/checkpoint-epoch-1",
+  "split": "all",
+  "samples": 4000,
+  "inference": {
+    "items_scored": 64000,
+    "model_seconds": 26.816,
+    "samples_per_s": 2386.603,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "count": 4000,
+    "recall@1": 0.99975,
+    "recall@5": 1.0,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.999875,
+    "mean_rank": 1.00025,
+    "ndcg@1": 0.99975,
+    "ndcg@5": 0.9999077324383928,
+    "ndcg@10": 0.9999077324383928,
+    "ndcg@20": 0.9999077324383928,
+    "hit@1": 0.99975,
+    "hit@5": 1.0,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B",
+  "split": "test",
+  "samples": 1000,
+  "inference": {
+    "items_scored": 16000,
+    "model_seconds": 994.766,
+    "samples_per_s": 16.084,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "count": 1000,
+    "recall@1": 0.735,
+    "recall@5": 0.982,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.8422690476190475,
+    "mean_rank": 1.485,
+    "ndcg@1": 0.735,
+    "ndcg@5": 0.8756339360002986,
+    "ndcg@10": 0.8819184330400491,
+    "ndcg@20": 0.8819184330400491,
+    "hit@1": 0.735,
+    "hit@5": 0.982,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

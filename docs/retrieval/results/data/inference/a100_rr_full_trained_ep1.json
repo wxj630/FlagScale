@@ -1,0 +1,31 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/flagos-search-ckpts/a100-fp32master-3epoch/qwen3_reranker/checkpoint-epoch-1",
+  "split": "test",
+  "samples": 16740,
+  "inference": {
+    "items_scored": 267840,
+    "model_seconds": 16983.694,
+    "samples_per_s": 15.77,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "metrics": {
+    "count": 16740,
+    "recall@1": 0.7434886499402629,
+    "recall@5": 0.9670250896057347,
+    "recall@10": 0.9943249701314217,
+    "recall@20": 1.0,
+    "mrr": 0.8401581829494016,
+    "mean_rank": 1.6099761051373955,
+    "ndcg@1": 0.7434886499402629,
+    "ndcg@5": 0.8690444194090399,
+    "ndcg@10": 0.8780926409092412,
+    "ndcg@20": 0.8795980736579906,
+    "hit@1": 0.7434886499402629,
+    "hit@5": 0.9670250896057347,
+    "hit@10": 0.9943249701314217,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

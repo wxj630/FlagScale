@@ -1,0 +1,35 @@
+{
+  "model_type": "qwen3_reranker",
+  "task": "reranker",
+  "checkpoint": "/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B",
+  "split": "test",
+  "samples": 16740,
+  "inference": {
+    "items_scored": 267840,
+    "model_seconds": 15934.826,
+    "samples_per_s": 16.808,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "GPU"
+  },
+  "metrics": {
+    "count": 16740,
+    "recall@1": 0.7306451612903225,
+    "recall@5": 0.9873357228195938,
+    "recall@10": 1.0,
+    "recall@20": 1.0,
+    "mrr": 0.8394108778517483,
+    "mean_rank": 1.4861409796893668,
+    "ndcg@1": 0.7306451612903225,
+    "ndcg@5": 0.8753389838821484,
+    "ndcg@10": 0.8798117486788546,
+    "ndcg@20": 0.8798117486788546,
+    "hit@1": 0.7306451612903225,
+    "hit@5": 0.9873357228195938,
+    "hit@10": 1.0,
+    "hit@20": 1.0,
+    "num_negatives": 15
+  }
+}

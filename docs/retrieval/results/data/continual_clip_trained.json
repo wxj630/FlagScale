@@ -1,0 +1,47 @@
+{
+  "model_type": "clip_vit_large",
+  "task": "clip",
+  "checkpoint": "/flagos-retrieval-ckpts/continual/clip_flickr30k/checkpoint-epoch-1",
+  "split": "all",
+  "samples": 5000,
+  "inference": {
+    "items_scored": 10000,
+    "model_seconds": 157.78,
+    "samples_per_s": 63.379,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "text_to_image": {
+      "count": 5000,
+      "recall@1": 0.5442,
+      "recall@5": 0.7808,
+      "recall@10": 0.8542,
+      "mrr": 0.6526673568356836,
+      "mean_rank": 6.4818,
+      "ndcg@1": 0.5442,
+      "ndcg@5": 0.6721603323988654,
+      "ndcg@10": 0.695955875648693,
+      "hit@1": 0.5442,
+      "hit@5": 0.7808,
+      "hit@10": 0.8542
+    },
+    "image_to_text": {
+      "count": 5000,
+      "recall@1": 0.6222,
+      "recall@5": 0.8462,
+      "recall@10": 0.9084,
+      "mrr": 0.7220171709852246,
+      "mean_rank": 4.569,
+      "ndcg@1": 0.6222,
+      "ndcg@5": 0.7435694325198249,
+      "ndcg@10": 0.7638379928007751,
+      "hit@1": 0.6222,
+      "hit@5": 0.8462,
+      "hit@10": 0.9084
+    }
+  }
+}

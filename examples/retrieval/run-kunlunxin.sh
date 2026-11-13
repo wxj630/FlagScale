@@ -67,8 +67,14 @@ echo "===== $model card=$card start $(date '+%F %T') ====="
 EXTRA=()
 PARALLEL=ddp
 NPROC=1
+# fsdp2/ddp keep model parameters in `master_dtype`; the megatron path builds
+# its OptimizerConfig with params_dtype=bf16 and cannot honour it.  Passing fp32
+# there was silently ignored, so the run record claimed fp32 while the weights
+# were bf16 -- pass bf16 explicitly to say what actually happens.
+MASTER_DTYPE_ARG="train.master_dtype=fp32"
 if [ "$model" = "qwen3_reranker" ]; then
   PARALLEL=megatron
+  MASTER_DTYPE_ARG="train.master_dtype=bf16"
   NPROC=$(awk -F, '{print NF}' <<< "$CUDA_VISIBLE_DEVICES")
   STAGE_DIR=${FLAGSCALE_STAGE_DIR:-$ROOT/../megatron-reranker/work/pp${NPROC}-8b}
   if [ ! -f "$STAGE_DIR/stage0.pt" ]; then
@@ -105,7 +111,7 @@ fi
 $PY -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
   action=test "train=$model" \
-  train.parallel=$PARALLEL train.master_dtype=fp32 \
+  train.parallel=$PARALLEL $MASTER_DTYPE_ARG \
   experiment.runner.nproc_per_node="$NPROC" \
   train.hardware.device_type=cuda train.hardware.distributed_backend=auto \
   train.hardware.autocast_device=auto train.hardware.use_flaggems=false \
