@@ -538,6 +538,16 @@ def main() -> None:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--task", required=True, choices=["embedding", "reranker", "clip", "vl_embedding"])
     parser.add_argument("--data-path", required=True)
+    # The image readers come in two packagings and the evaluator cannot guess
+    # which one it was handed: the COCO dump is WebDataset tar, Flickr30K on
+    # ModelScope is parquet.  Local training reads this from `data.format`; an
+    # evaluation run needs the same switch or it silently yields zero rows.
+    parser.add_argument(
+        "--data-format",
+        default=None,
+        choices=["tar", "parquet", "pair", "triplet"],
+        help="dataset packaging; omitted keeps the task default (tar for clip, triplet for text)",
+    )
     parser.add_argument("--split", default="validation")
     parser.add_argument("--split-modulo", type=int, default=20)
     parser.add_argument("--num-negatives", type=int, default=15)
@@ -610,6 +620,7 @@ def main() -> None:
             "split_modulo": args.split_modulo,
             "num_negatives": args.num_negatives,
             "shuffle_buffer": 0,
+            **({"format": args.data_format} if args.data_format else {}),
         }
     )
     dataset = build_dataset(args.task, data_cfg, args.data_path, args.split, args.max_samples)

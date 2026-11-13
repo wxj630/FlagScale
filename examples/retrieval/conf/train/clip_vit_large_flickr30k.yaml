@@ -36,20 +36,20 @@ model:
 data:
   path: /flagos-retrieval-datasets/flickr30k
   validation_path: /flagos-retrieval-datasets/flickr30k
-  # Evaluated on the acceptance set, not on Flickr30K: the training rows come
-  # from the same corpus, so scoring it would measure memorisation.
-  test_path: /flagos-retrieval-datasets/wds_mscoco_captions2017/wds_mscoco_captions2017/test
+  # Evaluated on Flickr30K's own holdout.  The same split_modulo rule that
+  # carves train (28,656 rows) out of the 9 shards leaves the 'test' bucket
+  # (1,607 rows) untouched by training: same corpus, disjoint rows.
+  test_path: /flagos-retrieval-datasets/flickr30k
   format: parquet
   image_column: image
   text_column: caption
-  # Train/validation are Flickr30K parquet; the evaluation set is the COCO
-  # WebDataset tar.  Without per-split formats the parquet reader is pointed at
-  # a directory of tars and yields nothing.
+  # All three splits share one packaging now.  The per-split keys stay because
+  # the acceptance runs still point test at the COCO tar.
   validation_format: parquet
-  test_format: tar
+  test_format: parquet
   train_split: train
   validation_split: validation
-  test_split: all
+  test_split: test
   eval_max_samples: 256
   split_modulo: 20
   shuffle_buffer: 2000

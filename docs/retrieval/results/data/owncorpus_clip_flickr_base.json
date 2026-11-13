@@ -1,0 +1,47 @@
+{
+  "model_type": "clip_vit_large",
+  "task": "clip",
+  "checkpoint": "/flagos-retrieval-models/clip-vit-large-patch14/clip-vit-large-patch14",
+  "split": "test",
+  "samples": 1607,
+  "inference": {
+    "items_scored": 3214,
+    "model_seconds": 15.965,
+    "samples_per_s": 201.314,
+    "scope": "model forward only; dataloader and CPU ranking excluded"
+  },
+  "platform": {
+    "device": "cuda",
+    "device_name": "NVIDIA A100-SXM4-80GB"
+  },
+  "metrics": {
+    "text_to_image": {
+      "count": 1607,
+      "recall@1": 0.685749844430616,
+      "recall@5": 0.8948350964530181,
+      "recall@10": 0.9321717485998755,
+      "mrr": 0.7769388888686376,
+      "mean_rank": 4.3758556316116985,
+      "ndcg@1": 0.685749844430616,
+      "ndcg@5": 0.8004970355976005,
+      "ndcg@10": 0.8127361383363106,
+      "hit@1": 0.685749844430616,
+      "hit@5": 0.8948350964530181,
+      "hit@10": 0.9321717485998755
+    },
+    "image_to_text": {
+      "count": 1607,
+      "recall@1": 0.7380211574362165,
+      "recall@5": 0.9091474797759801,
+      "recall@10": 0.9427504667081519,
+      "mrr": 0.8123526006488632,
+      "mean_rank": 3.7355320472930926,
+      "ndcg@1": 0.7380211574362165,
+      "ndcg@5": 0.8314115990394924,
+      "ndcg@10": 0.8422638738992072,
+      "hit@1": 0.7380211574362165,
+      "hit@5": 0.9091474797759801,
+      "hit@10": 0.9427504667081519
+    }
+  }
+}
