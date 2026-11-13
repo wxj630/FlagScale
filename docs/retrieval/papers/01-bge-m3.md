@@ -364,6 +364,112 @@ MLDR 是 M3 论文**自己构造**的数据集（用 GPT-3.5 从长文中生成�
 | Dense+Sparse | 合并两个 top-1000 重排，w₁=1, w₂=0.3 |
 | All | dense top-200 上用三路融合，w₁=1, w₂=0.3, w₃=1 |
 
+#### 三种输出到底是什么（公式与用途）
+
+**同一个 encoder，同一次前向，三种读出方式**——不是三个模型。
+
+设 encoder 输出隐藏状态 `H`（序列长度 L × 维度 d = 1024）。
+
+| | 公式 | 每个 doc 存多少 | 检索结构 |
+|---|---|---|---|
+| **Dense** | `e = norm(H[0])`（取 `[CLS]` 一行），`s = ⟨e_q, e_p⟩` | **1024 维**（4 KB @fp32）| 向量索引（Faiss）|
+| **Sparse** | `w_t = ReLU(W_lex^T · H[i])`（`W_lex` 为 d×1），`s = Σ_{t∈q∩p} w_qt·w_pt` | **L 个标量** | **倒排索引（Lucene）** |
+| **Multi-vector** | `E = norm(W_mul^T · H)`（`W_mul` 为 d×d），`s = (1/N)Σ_i max_j (E_q[i]·E_p[j])` | **L × 1024 维**（约 100-500 倍）| ColBERT late-interaction |
+
+**三者的失败模式不重叠**，这是理解论文为什么要融合的关键：
+
+| 路 | 强在 | 弱在 | 例子 |
+|---|---|---|---|
+| **Dense** | 语义匹配 | 精确串、长文稀释 | 「iPhone 电池」↔「苹果续航」✅ |
+| **Sparse** | 精确匹配 | 同义词完全失效 | 型号代码、罕见专名 ✅ |
+| **Multi-vector** | 细粒度对齐、抗长文稀释 | 存储/算力 ×100 | 长文档局部匹配 ✅ |
+
+##### Sparse：Lucene 式词权重 + 倒排索引
+
+**倒排索引（inverted index）** = 词 → 含该词的文档列表，而不是文档 → 词：
+
+```
+苹果  → [doc1, doc2]
+手机  → [doc1, doc3]
+电池  → [doc1]
+```
+
+查「苹果 手机」直接取两个列表求交 → `[doc1]`，不必扫全文。这是 BM25 / Elasticsearch / Lucene 的基础。
+
+**词权重**：经典做法是 TF-IDF/BM25（TF 词频 × IDF 逆文档频率，含长度归一化）。
+BGE-M3 用**模型学出来**的权重代替统计量：`w_t = ReLU(W_lex^T · H[i])`，只需学一个
+d×1 投影，**不额外训练 encoder**。
+
+打分只在 **query 与 doc 共同出现的词**上求和，所以**字面不重叠就是 0 分**——
+这正是它的强项（精确串）和死穴（同义词）。
+
+> 与 BM25 的区别只在权重来源（学习 vs 统计）；**索引结构仍是倒排表**。
+> 论文原文：*"generate the weights of the corpus and then build the **sparse index
+> for searching top-1000 candidates with Lucene**"*。
+
+##### Multi-vector：ColBERT 的 max-sim
+
+```
+s_mul = (1/N) · Σ_{i=1}^{N} max_{j=1}^{M} (E_q[i] · E_p[j])
+```
+
+**逐字读**：对 query 的**每个 token**，在 doc 的所有 token 里找**最相似那一个**取 max，
+再对所有 query token 求平均。
+
+与 dense 的差别，用一个可验证的例子说明。构造两个 doc，**相关内容完全相同**，
+只是 docB 多塞 9 个无关 token：
+
+| | docA（2 token，全相关）| docB（11 token，仅 2 个相关）|
+|---|---|---|
+| **Dense 单向量内积** | 0.9977 | **0.2622** ← 崩了 |
+| **max-sim** | 0.9969 | **0.9969** ← 不受影响 |
+
+**max-sim 免疫无关 token**：无关 token 相似度低，`max` 直接忽略；只要文档里
+**任何一处**高度匹配就命中。而 dense 的平均池化会把无关 token 平均进去，拉偏语义向量。
+
+**"late" 的含义**：交互发生在**编码完成之后**（打分阶段），所以 doc 的 token 向量
+可以离线预计算并存成索引。代价是存储——
+
+| | Dense | Multi-vector |
+|---|---|---|
+| 每 doc | 1024 维（约 4 KB）| L × 1024 维（约 100-500 倍）|
+| 1 亿 doc | ~400 GB | **~40 TB** |
+| 打分 | 1 次内积 | **N × M 次内积** |
+
+所以论文明确说 *"the multi-vector method can be exempted from this step due to its
+**heavy cost**"*——**只重排 dense 的 top-200，不参与初检**。
+
+#### 我们只用 Dense（这是刻意的，不是遗漏）
+
+全库搜索 `sparse|lexical|colbert|multi-vector|W_lex|late-interaction` → **零命中**。
+训练与评测都只走 `[CLS]` 单向量内积：
+
+| 环节 | 我们的实现 | 用的哪一路 |
+|---|---|---|
+| 训练 | `embedding_loss`：`anchors @ candidates.T / τ` | Dense |
+| 评测 | `einsum("bd,bkd->bk", anchor_emb, candidates)` | Dense |
+| 适配器 | `pooling="cls"`，只返回 `sentence_embedding` | Dense |
+
+**这也符合主流用法**：官方 README 的第一段示例就是 dense
+（`model.encode(...)['dense_vecs']`），而 `return_sparse` / `return_colbert_vecs`
+都要**显式开启**。绝大多数向量检索场景（Faiss / Milvus / Qdrant 等向量库）
+消费的就是这一个 dense 向量。
+
+##### 但这带来三条必须写明的边界
+
+1. **我们对应论文的 "M3 Dense"，不是最好成绩。**
+   Dense 平均 nDCG@10 = **69.2**，M3 All = **71.5**，**天然低 2.3 点**。
+   这是范围问题，不是实现缺陷。
+
+2. **继续预训练的负结果不能与论文微调对比。**
+   论文阶段 2 的核心是自知识蒸馏（三路融合当教师）。我们只做 dense 对比学习，
+   形态对应的是**阶段 1**（纯对比学习），只是数据不同。
+
+3. **精确匹配和长文档是我们的短板。**
+   Sparse 强在型号/罕见专名，Multi-vector 强在抗长文稀释（MLDR avg 4,737 token）。
+   只做 dense 意味着在这些场景上会明显吃亏。**若验收场景含大量精确串查询，
+   需要评估是否补 sparse。**
+
 ## 对齐方案（若要与论文数值比较）
 
 1. 下载 MIRACL（HF `miracl/miracl`）与 MKQA（`apple-aiml-research/ml-mkqa`）

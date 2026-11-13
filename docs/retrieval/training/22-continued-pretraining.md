@@ -154,14 +154,41 @@ python tools/modelscope_parallel_download.py lmms-lab/Flickr30K \
 
 ---
 
-## 六、还没做的
+## 六、这次实验的边界（读结论前必看）
+
+### 6.1 只做了 Dense 这一路
+
+BGE-M3 论文的微调是 **dense + sparse + multi-vector 三路 + 自知识蒸馏**，
+**我们只做 dense**。全库搜索 `sparse|colbert|multi-vector|W_lex|late-interaction`
+零命中，训练和评测都只走 `[CLS]` 单向量内积。
+
+| 路 | 论文公式 | 我们的实现 |
+|---|---|---|
+| **Dense** | `s = ⟨norm(H[0]), norm(H[0])⟩` | ✅ `embedding_loss` + `einsum` |
+| Sparse | `w_t = ReLU(W_lex^T H[i])`，倒排索引 | ❌ |
+| Multi-vector | `s = (1/N)Σ_i max_j E_q[i]·E_p[j]` | ❌ |
+
+**这不影响本次结论的有效性**，但限定了它能推广到哪：
+
+1. **对应论文的 "M3 Dense"（69.2），不是 M3 All（71.5）**——天然差 2.3 点。
+2. **不能与论文阶段 2 的微调对比**：那一步的核心是自知识蒸馏，
+   而我们做的是纯对比学习，形态对应**阶段 1**。
+3. **精确匹配和长文档是短板**：sparse 强在型号/罕见专名，
+   multi-vector 强在抗长文稀释。只做 dense 在这些场景会吃亏。
+
+> **为什么只做 dense 是合理的**：官方 README 第一段示例就是 dense
+> （`model.encode(...)['dense_vecs']`），`return_sparse` / `return_colbert_vecs`
+> 都要显式开启；Faiss / Milvus / Qdrant 这些向量库消费的就是这一个向量。
+> 详细对比见 [papers/01-bge-m3.md](../papers/01-bge-m3.md) §检索方式。
+
+### 6.2 其他未做的
 
 | 项 | 说明 |
 |---|---|
-| **三个模型的训练都还没跑** | 本次只到"数据可下载 + 读取器可用 + 单测通过" |
 | hard negative mining | MS MARCO 用的是随机负例，与论文配方有差距 |
-| BGE 的多语言/多语料配方 | 论文预训练用了 1.2B 条 194 语料，这里只有 LCQMC 的 24 万条中文问句 |
-| 续训的学习率曲线 | 只跑 1 epoch，没有做 lr schedule 的 re-anchor 验证 |
+| 多语料配方 | 论文预训练用 1.2B 条 194 语料，这里只有 LCQMC 的 24 万条中文问句 |
+| 学习率曲线 | 只跑 1 epoch，没做 lr schedule 的 re-anchor 验证 |
+| CLIP / reranker 的 PPU 侧 | 部分未跑完 |
 
 ---
 
