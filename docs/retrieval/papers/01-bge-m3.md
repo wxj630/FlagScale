@@ -41,6 +41,40 @@
 > **RetroMAE 那一步贡献 +5.6 点，比整个无监督预训练（+3.1）还大。**
 > 论文原话：*"RetroMAE can significantly improve the retrieval performance"*
 > （`main.tex:670`）。
+>
+> **为什么**：RetroMAE 专门训练 `[CLS]` 承担信息瓶颈（见阶段 0 的说明），
+> 而 dense 检索就是拿 `[CLS]` 做内积——目标与用法结构一致。
+> 无监督预训练只是在这个基础上继续对齐，收益自然小一些。
+
+#### 18 语言分项（论文附录表 `tab:stage_ablation`）
+
+| 语言 | 仅微调 | +RetroMAE | +无监督 | Δ1 | Δ2 |
+|---|---|---|---|---|---|
+| ar | 71.0 | 75.9 | 78.4 | +4.9 | +2.5 |
+| bn | 72.5 | 77.9 | 80.0 | +5.4 | +2.1 |
+| **en** | 47.6 | 54.5 | 56.9 | **+6.9** | +2.4 |
+| es | 46.7 | 54.0 | 56.1 | +7.3 | +2.1 |
+| fa | 51.8 | 58.3 | 60.9 | +6.5 | +2.6 |
+| fi | 72.3 | 76.6 | 78.6 | +4.3 | +2.0 |
+| fr | 50.9 | 55.1 | 58.3 | +4.2 | +3.2 |
+| hi | 48.9 | 57.0 | 59.5 | **+8.1** | +2.5 |
+| id | 48.9 | 53.9 | 56.1 | +5.0 | +2.2 |
+| ja | 65.7 | 70.1 | 72.8 | +4.4 | +2.7 |
+| ko | 60.5 | 66.9 | 69.9 | +6.4 | +3.0 |
+| ru | 60.9 | 66.9 | 70.1 | +6.0 | +3.2 |
+| sw | 71.9 | 74.8 | 78.7 | +2.9 | +3.9 |
+| te | 81.3 | 86.1 | 86.2 | +4.8 | +0.1 |
+| th | 74.7 | 79.5 | 82.6 | +4.8 | +3.1 |
+| **zh** | 54.4 | 61.9 | 62.7 | **+7.5** | **+0.8** |
+| de | 48.7 | 52.7 | 56.7 | +4.0 | +4.0 |
+| **yo** | 60.6 | 67.5 | **81.8** | +6.9 | **+14.3** |
+| **平均** | **60.5** | **66.1** | **69.2** | +5.6 | +3.1 |
+
+> **两个极端值得注意**：
+> - **zh**：无监督预训练只 +0.8（微调数据里已有 386.6K 中文，边际收益小）
+> - **yo**（约鲁巴语，低资源）：无监督预训练 **+14.3**——低资源语言主要靠那 1.2B 数据
+>
+> 这与语言分布一致（中英占 64.4%，其余 183 种分 35.6%）。
 
 ### ✅ 每个阶段的权重都开源了
 
@@ -88,6 +122,55 @@ RetroMAE 阶段的数据不在表 8 里**，写在附录 §A 正文（`main.tex:
 >
 > 这一阶段只做 MAE 式重建 + 把 max_length 从 512 扩到 8192，**不做检索训练**。
 > 论文刻意把它与下面 1.2B 的检索预训分开算（消融见表 3）。
+
+#### ⚠️ RetroMAE 是 encoder–decoder，不是纯 MLM
+
+**容易搞错的地方**：最终发布的 `bge-m3` 是纯 encoder（`XLMRobertaModel`，24 层），
+于是容易以为预训练也只用了 encoder。**不是。**
+
+源码 `staoxiao/RetroMAE/src/pretrain/modeling.py`：
+
+```python
+self.lm = bert                                     # encoder，复用 XLM-R 全部权重
+self.decoder_embeddings = self.lm.bert.embeddings   # decoder 复用词嵌入
+self.c_head = BertLayerForDecoder(bert.config)      # 独立 decoder 层
+self.c_head.apply(self.lm._init_weights)            # 随机初始化，不复用 encoder 权重
+```
+
+`BertLayerForDecoder` 内含 `self.crossattention`（`enhancedDecoder.py:215`）。
+
+**前向流程**（这才是它和 MLM 的本质区别）：
+
+```python
+# encoder 只看「被 mask 过的」文本
+cls_hiddens = lm_out.hidden_states[-1][:, :1]        # 只取 [CLS]
+
+# decoder 输入 = [CLS] + 原始（未 mask）的 token embedding
+hiddens = cat([cls_hiddens, decoder_embedding_output[:, 1:]])
+
+# cross-attention 的 query 来自位置嵌入 + [CLS]
+query = decoder_position_embeddings + cls_hiddens
+
+# 从 [CLS] + 少量可见 token 重建整句
+pred_scores, loss = self.mlm_loss(hiddens, decoder_labels)
+```
+
+| | 普通 MLM（BERT）| **RetroMAE** |
+|---|---|---|
+| decoder | 一层线性 MLM head | **独立 Transformer 层 + cross-attention** |
+| 重建依据 | 双向上下文（邻居全可见）| **主要靠 `[CLS]`** |
+| 对 `[CLS]` 的要求 | 无 | **必须压缩全句语义** |
+
+> **为什么这对检索重要**：dense 检索就是拿 `[CLS]` 向量做内积。普通 MLM 里
+> `[CLS]` 对重建几乎没贡献（上下文够用），所以不会被训练成好句向量；
+> RetroMAE 切断上下文、让 `[CLS]` 成为唯一信息通道，**训练目标与使用方式结构一致**。
+> 这就是消融里它值 +5.6 点的原因。
+
+> **一处细节**：HF 上 `bge-m3-retromae` 的 `config.json` 写的是
+> `XLMRobertaForMaskedLM`，那只是加载兼容用的外壳；训练时是
+> `RetroMAEForPretraining` 包装。导出成最终 `bge-m3` 时 `c_head` 被丢掉，
+> 所以成品是纯 encoder。该仓库里还有个 `bge-m3-with-deocder/`
+> （BAAI 把 decoder 拼成了 deocder）说明带 decoder 的版本也曾一并提供。
 
 ### 阶段 1 · 无监督预训练 —— 1.2B，194 语言（论文表 8）
 
