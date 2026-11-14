@@ -7,18 +7,23 @@
 
 ## 目录结构
 
-文档按**用途**分五个模块，编号保留原有顺序，便于从旧链接跳转：
+文档按**用途**分六个模块，编号保留原有顺序，便于从旧链接跳转：
 
 ```
 docs/retrieval/
-├── 00-index.md              本文件
-├── papers/      01-05       论文对照：数据集、指标、与实现的差异
-├── training/    12, 15      训练侧：并行方案、FlagGems 接入、各芯片启动命令
-├── results/     07-09, 14, 16   实验结果：各平台精度/吞吐 + 原始 JSON
-│   └── data/                实测产物（推理吞吐、算子微基准）
-├── analysis/    06, 10, 11, 13  分析：GPU-hours、折扣系数、慢算子、厂商问题
-└── acceptance/  17          验收：docx 条款逐条对照
+├── 00-index.md                   本文件
+├── papers/          01-05        论文对照：数据集、指标、与实现的差异
+├── training/        12, 15, 18-19, 21  训练侧：并行方案、FlagGems、启动命令、环境
+├── results/         07-09, 14, 16      验收实验：各平台精度/吞吐 + 原始 JSON
+│   └── data/                     实测产物（推理吞吐、算子微基准、继续预训练）
+├── continued-pretraining/        **继续预训练：独立目录，不与验收结果混放**
+├── analysis/        06, 10, 11, 13     分析：GPU-hours、折扣系数、慢算子、厂商问题
+└── acceptance/      17           验收：docx 条款逐条对照
 ```
+
+> **`continued-pretraining/` 为什么单独一个目录**：它回答的是"喂新语料能力会变好还是
+> 变坏"，与验收实验（"在 T²-Ranking 上达标"）是不同的问题、不同的数据、不同的口径。
+> **结论不参与达标判定。**
 
 ## 索引
 
@@ -38,7 +43,7 @@ docs/retrieval/
 | 编号 | 文档 | 内容 |
 |---|---|---|
 | **21** | [**A100 基准代码讲解**](training/21-a100-code-walkthrough.md) | **逐模块讲解**：模型适配器 / 数据管线 / 训练循环 / 存盘与续训 / 评测。每条设计都带"为什么"和踩过的坑（FSDP2 存盘三缺陷、split 按 query 分组、sync 选择性关闭）|
-| **22** | [**继续预训练数据与流程**](training/22-continued-pretraining.md) | **与验收微调的区别**：只有正例对、负例来自 batch 内、训练与评测必须换语料。三个 ModelScope 数据集（LCQMC / Flickr30K / MS MARCO）的字段、大小、转换步骤，以及 ModelScope **按连接限速**导致的下载需并发（实测 28×）|
+| **22** | [**继续预训练**](continued-pretraining/README.md) | **独立目录，不与验收微调混放**：[方法/数据/失效分析](continued-pretraining/00-method-and-results.md) + [A100 结果与吞吐](continued-pretraining/01-a100-results.md)。结论：BGE nDCG@10 −1.54、Reranker −4.88、CLIP 持平；自有语料基准全部饱和 |
 | **19** | [**适配方案与工作量说明**](training/19-adaptation-report.md) | **给甲方**：A100 标准流程、四平台适配方案（各自的运行时缺陷与绕法）、工作量汇总（+2,824 行、13 个缺陷、31 h 损失）、遗留问题 |
 | **18** | [**训练环境与脚本手册**](training/18-environment-and-scripts.md) | **换机器照着做**：四平台环境实况（torch 2.9/2.10/2.11 各不相同）、Python 入口、路径软链、训练/评测/分析脚本用法、上手检查清单 |
 | 15 | [**各芯片启动命令**](training/15-launch-commands.md) | **每台机器只有一条验证过的启动路径**。A100 / 昆仑芯 / PPU 的命令原文、必需环境变量、每个踩过的坑与报错原文。PPU 必须进容器，卡号在容器内重新编号 |
