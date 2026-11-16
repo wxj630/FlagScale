@@ -3,6 +3,13 @@
 本文记录 **BGE-M3**、**CLIP ViT-L/14** 和 **Qwen3-Reranker-8B** 在四台机器上
 **实际跑通的命令**与**环境构成**。每个数字都对应一次真实运行，不是设计稿。
 
+部署目录、镜像和网络接口均以环境变量占位；使用前按自己的环境赋值。
+`A100_CODE_ROOT`、`P800_WORKSPACE`、`PPU_HOST_WORKSPACE` 分别表示各平台工作区，
+`CONTAINER_WORKSPACE` 表示容器工作区；`MODEL_ROOT`、`DATA_ROOT`、
+`CHECKPOINT_ROOT` 为实际存储位置，`MODEL_LINK`、`DATA_LINK`、`CHECKPOINT_LINK`
+为配置所用入口。其余变量按名称对应 Python 环境、SDK、临时目录、镜像和接口。
+这些占位值不会自动改写已有平台脚本中的部署配置。
+
 > 配置只有一份：`examples/retrieval/conf/`。换机器只改**路径和设备**，
 > 超参（batch / lr / epochs / max_length / 数据 split）一律不动，否则结果不可比。
 > 详见仓库根目录 `AGENTS.md` 第八节。
@@ -20,7 +27,7 @@
 |---|---|---|
 | A100 | **FSDP2** | 标准 torch 支持，分片到 2 卡 |
 | PPU | **FSDP2** | 已跑通；需补一个 all-gather shim |
-| 昆仑芯 P800 | **Megatron PP=2 / TP=1** | FSDP2 在 P800 上只能 bf16 master |
+| 昆仑芯 P800 | **FSDP2（八卡短测试）/ Megatron PP=2** | fp32 master FSDP2 已完成短测试；历史 PP 路线仍保留 |
 
 两种策略的取舍见第五节。
 
@@ -28,10 +35,10 @@
 
 | 平台 | 运行时 | 设备类型 | bge/clip 并行 | reranker 并行 | 环境形态 |
 |---|---|---|---|---|---|
-| A100（bitahub_2gpus） | 原生 CUDA（标准 torch） | `cuda` | DDP（1 卡/模型） | **FSDP2（2 卡）** | **venv** |
+| A100（两卡环境） | 原生 CUDA（标准 torch） | `cuda` | DDP（1 卡/模型） | **FSDP2（2 卡）** | **venv** |
 | PPU（pingtouge） | Torch-FL `flagos` 设备 | `flagos` | DDP（1 卡/模型） | **FSDP2（2 卡）** | **镜像 + 容器** |
-| 昆仑芯 P800（kunlunxin） | 厂商 XPytorch（`torch_xmlir`） | `cuda` | DDP（1 卡/模型） | **Megatron PP=2（2 卡）** | **venv** |
-| A100（bitahub，旧 1 卡） | Torch-FL CUDA boxing | `flagos` | DDP | 不适用 | venv（历史基线） |
+| 昆仑芯 P800（kunlunxin） | 厂商 XPytorch（`torch_xmlir`） | `cuda` | DDP（1 卡/模型） | **FSDP2（8 卡短测试）/ Megatron PP=2** | **venv** |
+| A100（历史单卡环境） | Torch-FL CUDA boxing | `flagos` | DDP | 不适用 | venv（历史基线） |
 
 **三种运行时的区别**：
 
@@ -41,13 +48,13 @@
 - **厂商 XPytorch**：厂商的 torch 发行版把 XPU 伪装成 `torch.cuda`，
   所以代码里写 `cuda` 就行，**但 venv 里没有 `torch_fl`**（`ModuleNotFoundError`）。
 
-## 二、A100（bitahub_2gpus，2×A100-80GB）
+## 二、A100（两卡环境，2×A100-80GB）
 
 ### 环境：venv（关键：没有 torch_fl）
 
 ```text
-venv:  /flagos-search-codes/sentence-transformers/.venv
-python 3.12.13（home = /opt/conda/bin，用 uv 创建）
+venv:  ${A100_CODE_ROOT}/sentence-transformers/.venv
+python 3.12.13（home = ${BASE_PYTHON_BIN}，用 uv 创建）
 torch          2.11.0+cu128      ← 标准 PyPI CUDA 构建
 transformers   5.16.1
 hydra-core     1.3.2
@@ -58,7 +65,7 @@ numpy          1.26.4
 （`train-a100-fp32master.sh`）用的就是同一个 venv，所以历史结果可比。
 
 > ⚠️ 两个 venv 陷阱：
-> 1. `/flagos-search-codes/torch-fl-cuda/.venv` 是**坏的**（缺 `bin/python`），
+> 1. `${A100_CODE_ROOT}/torch-fl-cuda/.venv` 是**坏的**（缺 `bin/python`），
 >    FlagScale 配置里 `before_start` 默认 source 的正是它 → 报
 >    `torch-fl-cuda/.venv/bin/torchrun: cannot execute`。
 >    必须显式 `export FLAGSCALE_PYTHON_ENV=<好的 venv>`。
@@ -67,12 +74,12 @@ numpy          1.26.4
 
 ### 路径
 
-配置里写 `/flagos-retrieval-{models,datasets,ckpts}`，这台机器需要软链（已建）：
+配置中的模型、数据和输出入口需要与存储位置对齐，软链示例：
 
 ```bash
-ln -sfn /flagos-search-models    /flagos-retrieval-models
-ln -sfn /flagos-search-datasets  /flagos-retrieval-datasets
-ln -sfn /flagos-search-ckpts     /flagos-retrieval-ckpts
+ln -sfn ${MODEL_ROOT}    ${MODEL_LINK}
+ln -sfn ${DATA_ROOT}  ${DATA_LINK}
+ln -sfn ${CHECKPOINT_ROOT}     ${CHECKPOINT_LINK}
 ```
 
 ### 运行命令
@@ -91,9 +98,9 @@ bash examples/retrieval/run-a100.sh clip_vit_large 1
 
 ```bash
 export CUDA_VISIBLE_DEVICES=<card>
-export FLAGSCALE_PYTHON_ENV=/flagos-search-codes/sentence-transformers/.venv
+export FLAGSCALE_PYTHON_ENV=${A100_CODE_ROOT}/sentence-transformers/.venv
 export PATH="$FLAGSCALE_PYTHON_ENV/bin:$PATH"
-export PYTHONPATH=/flagos-search-codes/FlagScale
+export PYTHONPATH=${A100_CODE_ROOT}/FlagScale
 
 python -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
@@ -102,7 +109,7 @@ python -m flagscale.run \
   experiment.runner.nproc_per_node=1 \
   train.hardware.device_type=cuda train.hardware.distributed_backend=auto \
   train.hardware.autocast_device=auto train.hardware.use_flaggems=false \
-  train.output_dir=/flagos-retrieval-ckpts/a100-fp32master-3epoch/<model> \
+  train.output_dir=${CHECKPOINT_LINK}/a100-fp32master-3epoch/<model> \
   experiment.exp_dir=<same>/logs
 ```
 
@@ -118,7 +125,7 @@ bash examples/retrieval/run-a100.sh qwen3_reranker 0 "0,1"
 1. `train.parallel=fsdp2`、`experiment.runner.nproc_per_node=2`；
 2. 第三个参数是卡列表，写成 `CUDA_VISIBLE_DEVICES="0,1"`（torchrun 在重映射后的
    命名空间里从 0 开始编号，所以必须给连续集合）；
-3. 输出仍在 `/flagos-retrieval-ckpts/a100-fp32master-3epoch/qwen3_reranker`，
+3. 输出仍在 `${CHECKPOINT_LINK}/a100-fp32master-3epoch/qwen3_reranker`，
    和 `evaluate_models.sh` 的 `RUN_ROOT/<model>` 约定一致。
 
 FSDP2 把参数/梯度/优化器状态都分片到两张卡，所以 131 GB 的优化器状态只需
@@ -130,44 +137,44 @@ FSDP2 把参数/梯度/优化器状态都分片到两张卡，所以 131 GB 的�
 ### 环境：镜像 + 容器
 
 ```text
-镜像:  flagtree-ppu-py312-torch2.10.0-sdk2.1.0-cu130-ubuntu24.04:202607-3.6-base
-容器:  flagos-retrieval（挂载 /bmcp_lvm_fs/jiangxuhui → /workspace，--network=host）
+镜像:  ${PPU_IMAGE}（Python 3.12 / Torch 2.10 / SDK 2.1 / CUDA 13.0）
+容器:  flagos-retrieval（挂载 ${PPU_HOST_WORKSPACE} → ${CONTAINER_WORKSPACE}，--network=host）
 OS:    Ubuntu 24.04.2 LTS
 python 3.12.3
 torch          2.10.0            ← 标准 torch，厂商 CUDA 兼容层在 SDK 里
-torch_fl       2.10.0+ppu2.0.0   ← editable 装到 /workspace/Torch-FL
+torch_fl       2.10.0+ppu2.0.0   ← editable 装到 ${CONTAINER_WORKSPACE}/Torch-FL
 transformers   4.57.0
 hydra-core     1.3.7
 numpy          1.26.0
 ```
 
 厂商栈不是 torch 发行版，而是**SDK 层的 CUDA 兼容运行时**
-（`/usr/local/PPU_SDK/CUDA_SDK/lib64/libcuda.so`、`libcudart.so.13`、`libnccl.so`），
+（`${PPU_SDK_ROOT}/CUDA_SDK/lib64/libcuda.so`、`libcudart.so.13`、`libnccl.so`），
 所以 `torch.cuda` 直接可用、`device_name` 报 `PPU-ZW810E`。
 
 ### 两个必须设的环境变量
 
 ```bash
 export GEMS_VENDOR=thead          # PPU 是平头哥(the head)；不设则 FlagGems 探测失败退出
-export NCCL_SOCKET_IFNAME=bond0   # 不设则 NCCL 报 "no socket interface found"
+export NCCL_SOCKET_IFNAME=${NCCL_INTERFACE}   # 不设则 NCCL 报 "no socket interface found"
 ```
 
 ### 容器内路径（`/` 只读，软链必须建在容器内）
 
 ```bash
-ln -sfn /workspace/models /flagos-retrieval-models
-ln -sfn /workspace/data   /flagos-retrieval-datasets
-mkdir -p /flagos-retrieval-ckpts && ln -sfn /workspace/checkpoints /flagos-retrieval-ckpts/store
+ln -sfn ${CONTAINER_WORKSPACE}/models ${MODEL_LINK}
+ln -sfn ${CONTAINER_WORKSPACE}/data   ${DATA_LINK}
+mkdir -p ${CHECKPOINT_LINK} && ln -sfn ${CONTAINER_WORKSPACE}/checkpoints ${CHECKPOINT_LINK}/store
 # 配置用两级布局 <name>/<name>，PPU 数据是单层，补内层软链：
 for m in bge-m3 clip-vit-large-patch14 Qwen3-Reranker-8B; do
-  ln -sfn /workspace/models/$m /workspace/models/$m/$m
+  ln -sfn ${CONTAINER_WORKSPACE}/models/$m ${CONTAINER_WORKSPACE}/models/$m/$m
 done
 for d in t2ranking wds_mscoco_captions2017; do
-  ln -sfn /workspace/data/$d /workspace/data/$d/$d
+  ln -sfn ${CONTAINER_WORKSPACE}/data/$d ${CONTAINER_WORKSPACE}/data/$d/$d
 done
 ```
 
-一键完成：`bash examples/retrieval/setup-ppu-container.sh`（容器内，仓库挂在 /workspace）
+一键完成：`bash examples/retrieval/setup-ppu-container.sh`（容器内，仓库挂在 ${CONTAINER_WORKSPACE}）
 
 ### 运行命令
 
@@ -176,11 +183,11 @@ done
 ```bash
 # BGE-M3（容器 flagos-retrieval-bge，绑 ppu6）
 docker exec -d flagos-retrieval-bge bash -c \
-  "nohup bash /workspace/FlagScale/examples/retrieval/run-ppu-three.sh bge_m3 > /workspace/logs/launch-bge.log 2>&1"
+  "nohup bash ${CONTAINER_WORKSPACE}/FlagScale/examples/retrieval/run-ppu-three.sh bge_m3 > ${CONTAINER_WORKSPACE}/logs/launch-bge.log 2>&1"
 
 # CLIP（容器 flagos-retrieval-clip，绑 ppu7）
 docker exec -d flagos-retrieval-clip bash -c \
-  "nohup bash /workspace/FlagScale/examples/retrieval/run-ppu-three.sh clip_vit_large > /workspace/logs/launch-clip.log 2>&1"
+  "nohup bash ${CONTAINER_WORKSPACE}/FlagScale/examples/retrieval/run-ppu-three.sh clip_vit_large > ${CONTAINER_WORKSPACE}/logs/launch-clip.log 2>&1"
 ```
 
 脚本内部（`examples/retrieval/run-ppu-three.sh`）关键部分：
@@ -188,8 +195,8 @@ docker exec -d flagos-retrieval-clip bash -c \
 ```bash
 export FLAGSCALE_DEVICE=flagos FS_PLATFORM=flagos
 export FLAGSCALE_DISTRIBUTED_BACKEND=flagos FLAGSCALE_AUTOCAST_DEVICE=flagos
-export GEMS_VENDOR=thead NCCL_SOCKET_IFNAME=bond0 PYTHONPATH=/workspace/FlagScale
-export TMPDIR=/flagos-retrieval-ckpts/.../tmp          # 容器 / 小，别用 /tmp
+export GEMS_VENDOR=thead NCCL_SOCKET_IFNAME=${NCCL_INTERFACE} PYTHONPATH=${CONTAINER_WORKSPACE}/FlagScale
+export TMPDIR=${RUN_TMPDIR}          # 使用工作区内的临时目录，避免占满容器根目录
 
 python -m flagscale.run \
   --config-path examples/retrieval/conf --config-name train \
@@ -207,8 +214,8 @@ python -m flagscale.run \
 
 ```bash
 docker exec -d flagos-retrieval bash -c \
-  "cd /workspace/FlagScale && nohup bash examples/retrieval/run-ppu-three.sh qwen3_reranker \
-   > /workspace/logs/launch-reranker.log 2>&1"
+  "cd ${CONTAINER_WORKSPACE}/FlagScale && nohup bash examples/retrieval/run-ppu-three.sh qwen3_reranker \
+   > ${CONTAINER_WORKSPACE}/logs/launch-reranker.log 2>&1"
 ```
 
 脚本里 reranker 分支与 bge/clip 的差别只有并行方式和卡数：
@@ -249,7 +256,7 @@ PPU 厂商 `ProcessGroupNCCL` 缺 `allgather_into_tensor_coalesced`，FSDP2 会�
 ### 环境：venv（厂商 XPytorch，无 torch_fl）
 
 ```text
-venv:  /data2/jiangxuhui/envs/retrieval-vendor
+venv:  ${P800_WORKSPACE}/envs/retrieval-vendor
 python 3.10
 torch          2.9.0+cu128       ← 厂商 torch_xmlir（XPU 伪装成 cuda）
 transformers   4.57.6
@@ -261,12 +268,12 @@ torch_fl       ✗ 没有
 环境变量必须 source：
 
 ```bash
-source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
+source ${P800_WORKSPACE}/flagos-retrieval-vendor-env.sh
 ```
 
 它设置：`FLAGSCALE_DEVICE=cuda`、`FS_PLATFORM=cuda`、
-`LD_LIBRARY_PATH`（含 `torch_xmlir/xhpc/xblas/dependency_so`、`/usr/local/xpu/so`）、
-`TMPDIR=/data2/jiangxuhui/tmp`。
+`LD_LIBRARY_PATH`（含 `torch_xmlir/xhpc/xblas/dependency_so`、`${XPU_RUNTIME_LIB}`）、
+`TMPDIR=${P800_TMPDIR}`。
 
 ### 运行命令
 
@@ -279,9 +286,9 @@ bash examples/retrieval/run-kunlunxin.sh clip_vit_large 4
 脚本内部（`examples/retrieval/run-kunlunxin.sh`）：
 
 ```bash
-source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
+source ${P800_WORKSPACE}/flagos-retrieval-vendor-env.sh
 export CUDA_VISIBLE_DEVICES=<card> XPU_VISIBLE_DEVICES=<card>
-export TMPDIR=/data2/jiangxuhui/tmp      # 宿主 / 只剩 ~120MB
+export TMPDIR=${P800_TMPDIR}      # 宿主 / 只剩 ~120MB
 export FLAGOS_USE_FLAGGEMS=false
 
 $PY -m flagscale.run \
@@ -291,7 +298,7 @@ $PY -m flagscale.run \
   experiment.runner.nproc_per_node=1 \
   train.hardware.device_type=cuda train.hardware.distributed_backend=auto \
   train.hardware.autocast_device=auto train.hardware.use_flaggems=false \
-  train.output_dir=/data2/jiangxuhui/flagos-retrieval-ckpts/<model> \
+  train.output_dir=${P800_WORKSPACE}${CHECKPOINT_LINK}/<model> \
   experiment.exp_dir=<same>/logs
 ```
 
@@ -299,13 +306,29 @@ $PY -m flagscale.run \
 > 卡 2/3/6/7 长期被其他租户的 vLLM 占用且会在训练中途增长。选卡前先看
 > `xpu-smi`，并预留 20 GB 以上余量。
 
-### reranker：两张卡跑 Megatron PP=2（**不用 FSDP2**）
+### 八卡原生 FSDP2：独立 PyTorch 2.9 环境
 
-昆仑芯的 reranker **不走 FlagScale**，而是 `megatron-reranker/`（Megatron-LM-FL）。
+2026-11-13 的 八卡 P800 实验使用独立 XPytorch 环境，直接运行 FlagScale
+原生 trainer。主权重及 AdamW 状态为 fp32，计算参数及梯度归约为 bf16：
 
-**FSDP2 在 P800 上卡住的原因，不是"lm_head 没被切分"**——切分是生效的
-（日志里 `oversized leaf: backbone.lm_head gathers 1185 MiB` 指的是
-**all-gather 之后的完整缓冲**，不是未分片副本）。真正的机制是：
+```bash
+: "${FLAGSCALE_PYTHON_ENV:?Set an isolated XPytorch environment}"
+export FLAGSCALE_PYTHON_ENV
+bash examples/retrieval/run-p800-fsdp2.sh
+```
+
+入口默认执行 16 步短测试，并覆盖验证、测试和 checkpoint 保存。环境安装、
+数据版本和验证范围见 [P800 FSDP2 专项记录](retrieval-p800-fsdp2.md)。
+
+### 历史 reranker 实验：两张卡跑 Megatron PP=2
+
+本节记录 `${P800_WORKSPACE}` 上的历史实验，使用 `megatron-reranker/`
+（Megatron-LM-FL）。其中卡 1 损坏、其他租户占卡及 FSDP2 内存失败的记录仅适用于
+那台机器，不能套用到其他 P800 实例。后续八卡 FSDP2 实验见上文。
+
+历史 FSDP2 失败时切分已经生效（日志里
+`oversized leaf: backbone.lm_head gathers 1185 MiB` 指的是
+**all-gather 之后的完整缓冲**，不是未分片副本）。相关内存机制是：
 
 - FSDP2 每个 param group 在前向 pre-hook / 反向 pre-backward 要把整组参数
   all-gather 成**一块连续缓冲**，每个 rank 都临时持有一份完整权重；
@@ -316,15 +339,17 @@ $PY -m flagscale.run \
   不出 2.31 GiB —— 碎片化了；
 - 把 `embed_tokens` / `lm_head` 各自拆成独立 group 后，最大单次请求从 2.31 GiB
   降到 **1.16 GiB**（bf16），这样 bf16 master 能跑；
-- 但 fp32 master 下这块缓冲仍是 2.31 GiB，**所以 P800 的 FSDP2 只能停在
-  bf16 master（8 字节/参数）**，拿不到 A100 基线的 16 字节布局。
+- 历史实验据此退回 bf16 master。这个结果不能推出 P800 只能使用 bf16
+  master：当前实现通过 `MixedPrecisionPolicy(param_dtype=bf16)` 独立指定通信和
+  计算参数 dtype，即使主权重为 fp32，单个叶子模块的参数 all-gather 缓冲仍为
+  1.16 GiB。是否能运行应在具体的厂商版本和卡型上实测。
 
 Megatron 绕开的是这个缓冲本身：PP 把层切到不同 stage，每张卡只持有自己那些层，
 前向不需要把整个模型的参数 all-gather 起来；distributed optimizer 再分片
 fp32 主权重 + 两个 fp32 矩，于是拿到 A100 基线用的 **16 字节/参数**。
 
 ```bash
-cd /data2/jiangxuhui/megatron-reranker
+cd ${P800_WORKSPACE}/megatron-reranker
 CARDS=2,3 PP=2 NPROC=2 bash run_8b.sh      # 全部超参默认值来自配置语义
 ```
 
@@ -344,8 +369,8 @@ CARDS=2,3 PP=2 NPROC=2 bash run_8b.sh      # 全部超参默认值来自配置�
 
 ```bash
 CARDS=2,3 PP=2 NPROC=2 NUM_MICRO=64 MAX_LENGTH=640 EPOCHS=3 \
-CACHE_DIR=/data2/jiangxuhui/megatron-reranker/work/token-cache-split TRAIN_ROWS= \
-OUT=/data2/jiangxuhui/megatron-reranker/runs/reranker8b-pp2-split \
+CACHE_DIR=${P800_WORKSPACE}/megatron-reranker/work/token-cache-split TRAIN_ROWS= \
+OUT=${P800_WORKSPACE}/megatron-reranker/runs/reranker8b-pp2-split \
 EVAL_EVERY=250 SAVE_EVERY=1000 EVAL_BATCH_ROWS=4 \
 EXTRA="--warmup-steps 200 --skip-nonfinite" \
 setsid bash run_8b.sh > logs/pp2-split-outer.log 2>&1 < /dev/null &
@@ -376,7 +401,7 @@ Megatron 存的是每个 stage 一个 `stage{K}.pt`，评测器读不了。用�
 「导出 → 评测」：
 
 ```bash
-bash /data2/jiangxuhui/FlagScale/examples/retrieval/finish-kunlunxin-reranker.sh
+bash ${P800_WORKSPACE}/FlagScale/examples/retrieval/finish-kunlunxin-reranker.sh
 ```
 
 它做两件事：
@@ -401,18 +426,16 @@ bge/clip 是 0.6B 级，一卡一个模型用 DDP 就够了。reranker 8.19B 全
 | 通信 | all-gather 参数（前向/反向各一次） | stage 间只传激活（p2p） |
 | 额外算子要求 | `allgather_into_tensor_coalesced` | 无（用 PP 自带的 send/recv） |
 | 框架 | FlagScale `train.parallel=fsdp2` | Megatron-LM-FL `mrr/train.py` |
-| 已验证平台 | A100、PPU | 昆仑芯 P800 |
+| 已验证平台 | A100、PPU、P800（八卡短测试，见专项记录） | 昆仑芯 P800 |
 
 ### 为什么不是同一个方案通吃
 
-- **昆仑芯不能用 FSDP2 跑 fp32 master**：FSDP2 的切分本身是生效的，卡住的是
-  **all-gather 后的完整缓冲**——每个 param group 在每个 rank 上都要拼出一块完整
-  参数，`lm_head`（151669×4096）在 fp32 下就是 2.31 GiB，且不随卡数缩小。
-  P800 没有 `expandable_segments`，只能找连续物理段，28 GiB 空闲也失败。
-  bf16 下这块降到 1.16 GiB（再把它拆成独立 group），所以 FSDP2 只能停在
-  **bf16 master**，丢掉 16 字节/参数的 fp32 主权重。
-  Megatron 的 PP 不做整体 all-gather，distributed optimizer 又能分片 fp32 状态，
-  才拿到 16N。
+- **昆仑芯应按具体环境验证 FSDP2**：历史机器上曾因完整 all-gather 缓冲分配
+  失败而采用 Megatron PP，这不是平台无法使用 fp32 master 的结论。当前 FSDP2
+  将主权重 dtype 和 all-gather 的计算参数 dtype 分开，使用 fp32 master + bf16
+  `MixedPrecisionPolicy`，并把大 embedding/head 拆成独立 group。后续八卡实验
+  及厂商版本、checkpoint 形状修复见 [P800 FSDP2 专项记录](retrieval-p800-fsdp2.md)。
+  这些短测试不替代全数据集收敛验证。
 - **PPU 不用 Megatron**：Megatron-LM-FL 在 PPU 上没验证过，而 FSDP2 只需补一个
   all-gather shim 就能跑（见第三节）。按「适配开发量最小」原则选 FSDP2。
 - **A100 两者都行**，选 FSDP2 因为它是 FlagScale 原生路径，和 bge/clip 同一套
@@ -423,7 +446,8 @@ bge/clip 是 0.6B 级，一卡一个模型用 DDP 就够了。reranker 8.19B 全
 1. 平台原生 torch 的 FSDP2 能跑 → **用 FSDP2**（链路最短，评测脚本直接可用）。
 2. FSDP2 因分配器/算子缺失退化精度 → **用 Megatron PP**，并接受多一个
    `export_hf` 步骤。
-3. 两者都不行 → 先确认是不是卡的问题（P800 的卡 1 是坏的），别急着换框架。
+3. 两者都不行 → 检查当前机器的卡、运行时和通信后端。历史机器的卡故障记录
+   不能直接套用到其他实例。
 
 ### 两条路的对齐要求
 
@@ -470,7 +494,7 @@ bge/clip 是 0.6B 级，一卡一个模型用 DDP 就够了。reranker 8.19B 全
 ## 七、跑之前先跑 audit
 
 ```bash
-python tools/audit_retrieval.py --data /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+python tools/audit_retrieval.py --data ${DATA_LINK}/t2ranking/t2ranking/triplet-15
 ```
 
 它检查（不需要模型，秒级）：LR 调度是否正确、eval 是否默认全量、
@@ -482,8 +506,8 @@ python tools/audit_retrieval.py --data /flagos-retrieval-datasets/t2ranking/t2ra
 ```bash
 cd <FlagScale root>
 MODELS="bge_m3 clip_vit_large" \
-RUN_ROOT=/flagos-retrieval-ckpts/<run> \
-EVAL_DIR=/flagos-retrieval-ckpts/<run>/eval \
+RUN_ROOT=${CHECKPOINT_LINK}/<run> \
+EVAL_DIR=${CHECKPOINT_LINK}/<run>/eval \
 bash examples/retrieval/evaluate_models.sh
 ```
 
@@ -494,9 +518,9 @@ base 与 trained 会自动成对测量（同一次调用、同一口径）。默
 ### reranker 的三个额外注意点
 
 ```bash
-# FSDP2 路线（A100 / PPU）：checkpoint 已是 HF 格式，直接评
+# FSDP2 路线（A100 / PPU / P800）：checkpoint 已是 HF 格式，直接评
 MODELS="qwen3_reranker" NUM_NEGATIVES=15 BATCH_SIZE=8 \
-RUN_ROOT=/flagos-retrieval-ckpts/<run> EVAL_DEVICE=<cuda|flagos> \
+RUN_ROOT=${CHECKPOINT_LINK}/<run> EVAL_DEVICE=<cuda|flagos> \
 bash examples/retrieval/evaluate_models.sh
 
 # Megatron 路线（昆仑芯）：先导出 stage 权重，再评

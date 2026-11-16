@@ -304,8 +304,11 @@ def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
                 raise NotImplementedError("all_gather_tensor shim supports gather_dim=0")
             pg = _group_object(group, tag)
             group_size = pg.size()
+            # Match all_gather_tensor's concatenation contract. Returning a
+            # flat buffer makes DTensor trim uneven-shard padding as elements
+            # instead of rows, corrupting the shape of the gathered checkpoint.
             out = torch.empty(
-                tensor.numel() * group_size,
+                (group_size * tensor.shape[0], *tensor.shape[1:]),
                 dtype=tensor.dtype,
                 device=tensor.device,
             )
@@ -314,9 +317,7 @@ def install_coalesced_allgather_shim(log=lambda msg: None) -> bool:
             # which fails for the default group on this backend.
             from torch._C import _distributed_c10d as _c10d
 
-            work = pg._allgather_base(
-                out.view(group_size, *tensor.shape), tensor, _c10d.AllgatherOptions()
-            )
+            work = pg._allgather_base(out, tensor, _c10d.AllgatherOptions())
             if hasattr(work, "wait"):
                 work.wait()
             return torch.ops._c10d_functional.wait_tensor(out)
