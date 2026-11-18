@@ -64,9 +64,14 @@ mkdir -p "$EVAL_DIR"
 # Per-model batch. An 8B reranker scoring 16 candidates per query, and an 8B
 # vision-language model over image tokens, need far smaller batches than the
 # 0.6B text encoders.
+#
+# `QRR_EVAL_BATCH` overrides the reranker only. Kunlunxin P800 cannot run the
+# default: batch 8 died in the vendor `fc_fusion` kernel asking for a single
+# 41.66 GiB block (lm_head logits: 151k vocab x 640 tokens x batch), and batch 4
+# runs at 21.2 pairs/s. Set QRR_EVAL_BATCH=4 there.
 default_batch() {
   case "$1" in
-    qwen3_reranker) echo 12 ;;
+    qwen3_reranker) echo "${QRR_EVAL_BATCH:-12}" ;;
     qwen3_vl_embedding) echo 8 ;;
     clip_vit_large) echo 64 ;;
     *) echo 16 ;;
