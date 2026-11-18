@@ -12,14 +12,16 @@
 # would only reshuffle the same corpus and re-expose most of the rows already
 # seen, so this uses `data.skip_samples` instead: segment k skips the rows
 # earlier segments consumed, keeping the split boundaries and shuffle seed
-# fixed.  Verified disjoint and reproducible.
+# fixed.  The skip is applied after the shuffle buffer (see
+# ParquetTripletDataset.__iter__); applying it to the raw rows would let the
+# 20k-row lookahead pull rows back from a previous segment.
 #
 # The lr is re-derived per segment so the whole run follows one cosine schedule
 # over TOTAL_STEPS, instead of restarting warmup at every segment.  Optimizer
 # moments still restart at each boundary (save_model stores weights only).
 #
 # Usage:
-#   bash run-p800-segments.sh                    # all six segments, in order
+#   bash run-p800-segments.sh                    # all five segments, in order
 #   SEGMENT=3 bash run-p800-segments.sh          # just one
 set -uo pipefail
 
@@ -34,8 +36,21 @@ DATA=${DATA_PATH:-/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15}
 ROOT_OUT=${OUT:-/data2/jiangxuhui/flagos-retrieval-ckpts/p800-seg}
 
 BATCH=${BATCH_SIZE:-16}
-ROWS_PER_SEG=${ROWS_PER_SEG:-28800}   # per-rank rows; 28800/16 = 1800 steps, x6 covers the split
-TOTAL_SEGMENTS=${TOTAL_SEGMENTS:-6}
+# Per-rank rows per segment. 28,800 / 16 = 1,800 steps.
+#
+# The train split holds 307,797 rows (90% of T2Ranking's 340,111, via
+# split_modulo=20), i.e. 153,898 per rank over 2 ranks. Five segments walk
+# 144,000 of those per rank (93.6%) with every segment full. A sixth would have
+# only ~9,900 rows left, so it would stop at ~620 steps while the schedule
+# still assumed 1,800 -- and `skip_samples` past the end of the stream yields
+# nothing at all, it does not wrap.
+#
+# 5 x 1,800 steps = 9,000 steps x 32 rows = 288,000 rows of exposure, which is
+# the A100 epoch-1 baseline (4,794 steps x 64 rows = 306,816), so the two
+# checkpoints are comparable. Batch is 16 here only because 32 does not fit on
+# P800 (needs 11.57 GiB contiguous, 22.79 free is fragmented).
+ROWS_PER_SEG=${ROWS_PER_SEG:-28800}
+TOTAL_SEGMENTS=${TOTAL_SEGMENTS:-5}
 FIRST=${SEGMENT:-1}
 CARDS=${CARDS:-0,1}
 

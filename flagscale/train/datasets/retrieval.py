@@ -830,7 +830,16 @@ def build_dataset(
         length_sort_window=length_sort_window,
         # Segmented training walks the split in consecutive chunks: segment k
         # skips the (k-1)*chunk rows earlier segments already consumed.
-        skip_samples=int(data_cfg.get("skip_samples", 0) or 0),
+        #
+        # Only the training split skips. The evaluation splits are small (~5%
+        # of the corpus, ~17k rows) and must always be scored in full from the
+        # start; a segment-2 skip of 28,800 would run past their end, yield
+        # nothing, and fail the build-time probe.
+        skip_samples=(
+            int(data_cfg.get("skip_samples", 0) or 0)
+            if str(split).lower() in {"train", "training"}
+            else 0
+        ),
     )
 
 
