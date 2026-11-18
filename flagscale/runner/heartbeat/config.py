@@ -105,9 +105,14 @@ class HeartbeatLaunchConfig:
 
     def training_command_body(self, node_rank: int) -> str:
         """Run training and notify the node-zero heartbeat monitor on exit."""
+        # `$cmd; sync` returns sync's status, so a training crash exits 0 and
+        # every caller (segment loops, CI, a human reading "exit=0") believes the
+        # run succeeded. Capture the training status before `sync` and re-raise
+        # it either way. Found on the P800 segmented run: rank 0 died on a config
+        # error in 28s and the wrapper still printed `exit=0`.
         exit_actions = self.command_exit_actions(node_rank)
         if not exit_actions:
-            return "$cmd; sync"
+            return "$cmd; rc=\\$?; sync; exit \\$rc"
         return "$cmd; rc=\\$?; " + "; ".join(exit_actions) + "; sync; exit \\$rc"
 
     def command_exit_actions(self, node_rank: int) -> list[str]:

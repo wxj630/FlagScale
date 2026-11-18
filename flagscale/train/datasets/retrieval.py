@@ -222,6 +222,28 @@ def _length_sorted(stream: Iterator[Any], window: int) -> Iterator[Any]:
         yield from chunk
 
 
+def _drop_first(stream: Iterator[Any], count: int) -> Iterator[Any]:
+    """Consume ``count`` items without emitting them.
+
+    Used by segmented training to walk disjoint slices of one shuffled stream.
+    """
+
+    for index, item in enumerate(stream):
+        if index >= count:
+            yield item
+
+
+def _take(stream: Iterator[Any], count: int) -> Iterator[Any]:
+    """Emit at most ``count`` items, then stop pulling from ``stream``."""
+
+    if count <= 0:
+        return
+    for index, item in enumerate(stream):
+        yield item
+        if index + 1 >= count:
+            return
+
+
 class ParquetTripletDataset(IterableDataset[dict[str, str]]):
     """Stream triplets from one parquet file or a directory of shards.
 
@@ -240,6 +262,7 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         shuffle_buffer: int = 0,
         seed: int = 42,
         length_sort_window: int = 0,
+        skip_samples: int = 0,
     ) -> None:
         self.path = Path(path)
         self.columns = columns
@@ -250,6 +273,24 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         self.shuffle_buffer = int(shuffle_buffer or 0)
         self.seed = int(seed)
         self.length_sort_window = int(length_sort_window or 0)
+        # Drop this many per-rank rows before emitting anything.
+        #
+        # Segmented training restarts the process every N steps (the P800 run
+        # dies inside XCCL after ~2260 optimizer steps, and only a fresh process
+        # gets a fresh communicator).  Each segment must therefore train on a
+        # DIFFERENT slice; changing the shuffle seed instead would only reshuffle
+        # the same corpus and re-expose most of the rows already seen.
+        #
+        # The skip is applied in ``__iter__``, AFTER the shuffle buffer.  Doing it
+        # in the raw row stream looks equivalent but is not: ``_buffered_shuffle``
+        # holds ``shuffle_buffer`` rows in front of the cursor, so a segment that
+        # skips N rows still draws from roughly [N, N + chunk + buffer) and
+        # re-reads up to ``shuffle_buffer`` rows of the previous segment.  An
+        # earlier version of this comment claimed exact disjointness from a test
+        # whose chunk size equalled ``max_samples`` -- that left the shuffle
+        # window nothing to look ahead into, so it could not have detected the
+        # overlap it was written to rule out.
+        self.skip_samples = int(skip_samples or 0)
         self._epoch = 0
 
     def _files(self) -> list[Path]:
@@ -266,7 +307,6 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
         rank, world_size = _shard_context()
         seen = 0
         accepted = 0
-        yielded = 0
         for file_path in self._files():
             parquet = pq.ParquetFile(file_path)
             for batch in parquet.iter_batches(columns=self.columns, batch_size=256):
@@ -288,9 +328,6 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
                         continue
                     accepted += 1
                     yield {key: str(value or "") for key, value in row.items()}
-                    yielded += 1
-                    if self.max_samples is not None and yielded >= self.max_samples:
-                        return
 
     def set_epoch(self, epoch: int) -> None:
         """Seed the shuffle stream for a new epoch.
@@ -310,7 +347,14 @@ class ParquetTripletDataset(IterableDataset[dict[str, str]]):
             self.seed + self._epoch * 7919 + rank,
         )
         if self.length_sort_window > 0:
-            return _length_sorted(stream, self.length_sort_window)
+            stream = _length_sorted(stream, self.length_sort_window)
+        # Skip and cap the FINAL order (post-shuffle, post-sort).  Skipping the
+        # raw rows instead lets the shuffle lookahead pull rows back in from the
+        # range an earlier segment already trained on.
+        if self.skip_samples > 0:
+            stream = _drop_first(stream, self.skip_samples)
+        if self.max_samples is not None:
+            stream = _take(stream, self.max_samples)
         return stream
 
 
@@ -784,6 +828,9 @@ def build_dataset(
         shuffle_buffer=shuffle_buffer,
         seed=seed,
         length_sort_window=length_sort_window,
+        # Segmented training walks the split in consecutive chunks: segment k
+        # skips the (k-1)*chunk rows earlier segments already consumed.
+        skip_samples=int(data_cfg.get("skip_samples", 0) or 0),
     )
 
 

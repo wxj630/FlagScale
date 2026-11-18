@@ -33,7 +33,7 @@ def test_disabled_heartbeat_is_a_noop(tmp_path):
     resolved = prepare_heartbeat_launch_config(_config(tmp_path, {"enabled": False}), "run")
     assert resolved.enabled is False
     assert resolved.shell_setup_lines(0) == []
-    assert resolved.training_command_body(0) == "$cmd; sync"
+    assert resolved.training_command_body(0) == "$cmd; rc=\\$?; sync; exit \\$rc"
     assert resolved.command_exit_actions(0) == []
     assert resolved.stop_shell_lines(0) == []
 
@@ -75,7 +75,7 @@ def test_enabled_gpu_progress_heartbeat_has_no_preload_or_nccl_dependency(tmp_pa
     command_body = resolved.training_command_body(0)
     assert command_body.startswith("$cmd; rc=\\$?")
     assert resolved.completion_file in command_body
-    assert resolved.training_command_body(1) == "$cmd; sync"
+    assert resolved.training_command_body(1) == "$cmd; rc=\\$?; sync; exit \\$rc"
 
 
 def test_optional_hardware_health_starts_one_node_local_cpu_collector(tmp_path):
