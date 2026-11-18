@@ -44,6 +44,7 @@ docs/retrieval/
 |---|---|---|
 | **21** | [**A100 基准代码讲解**](training/21-a100-code-walkthrough.md) | **逐模块讲解**：模型适配器 / 数据管线 / 训练循环 / 存盘与续训 / 评测。每条设计都带"为什么"和踩过的坑（FSDP2 存盘三缺陷、split 按 query 分组、sync 选择性关闭）|
 | **22** | [**继续预训练**](continued-pretraining/README.md) | **独立目录，不与验收微调混放**：[方法/数据/失效分析](continued-pretraining/00-method-and-results.md) + [A100 结果与吞吐](continued-pretraining/01-a100-results.md)。结论：BGE nDCG@10 −1.54、Reranker −4.88、CLIP 持平；自有语料基准全部饱和 |
+| **23** | [**训练阶段与数据集（给甲方确认）**](training/23-training-stages-for-review.md) | 四个模型各自在论文里的训练阶段、每阶段的数据集与可得性，以及两条待确认的验收口径：CLIP 无微调 / Reranker 无预训练是否只验收单一阶段；BGE-M3 的两个预训练阶段是否都要验收 |
 | **19** | [**适配方案与工作量说明**](training/19-adaptation-report.md) | **给甲方**：A100 标准流程、四平台适配方案（各自的运行时缺陷与绕法）、工作量汇总（+2,824 行、13 个缺陷、31 h 损失）、遗留问题 |
 | **18** | [**训练环境与脚本手册**](training/18-environment-and-scripts.md) | **换机器照着做**：四平台环境实况（torch 2.9/2.10/2.11 各不相同）、Python 入口、路径软链、训练/评测/分析脚本用法、上手检查清单 |
 | 15 | [**各芯片启动命令**](training/15-launch-commands.md) | **每台机器只有一条验证过的启动路径**。A100 / 昆仑芯 / PPU 的命令原文、必需环境变量、每个踩过的坑与报错原文。PPU 必须进容器，卡号在容器内重新编号 |
