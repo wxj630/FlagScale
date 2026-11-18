@@ -49,7 +49,11 @@ def main() -> None:
         default="/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15",
         help="source directory of train-*.parquet shards",
     )
-    parser.add_argument("--out", required=True, help="destination directory")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="destination directory (required unless --dry-run)",
+    )
     parser.add_argument(
         "--rows-per-chunk",
         type=int,
@@ -79,6 +83,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if not args.dry_run and not args.out:
+        parser.error("--out is required unless --dry-run is given")
+
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -86,65 +93,69 @@ def main() -> None:
     if not files:
         raise SystemExit(f"no parquet under {args.data}")
 
-    out_dir = Path(args.out)
+    out_dir = Path(args.out) if args.out else None
     if not args.dry_run:
         out_dir.mkdir(parents=True, exist_ok=True)
 
     schema = pq.ParquetFile(files[0]).schema_arrow
     columns = schema.names
 
-    chunk_index = 0
-    chunk_rows: list[dict[str, str]] = []
-    written: list[dict[str, object]] = []
+    # Pass 1: count train rows across the WHOLE corpus, so chunking can be even.
+    # An earlier version stopped scanning as soon as it had written
+    # max_chunks files, which took every row from the front of the corpus and
+    # gave each chunk a different slice of the distribution. T2Ranking is ordered
+    # by query, so that bias is real: late-file queries would never appear.
     total_seen = 0
     total_train = 0
+    for path in files:
+        parquet = pq.ParquetFile(path)
+        for batch in parquet.iter_batches(columns=["anchor"], batch_size=2048):
+            for row in batch.to_pylist():
+                total_seen += 1
+                if split_accepts(
+                    0, "train", args.modulo, group_key=str(row.get("anchor") or "")
+                ):
+                    total_train += 1
 
-    def flush() -> None:
-        nonlocal chunk_index, chunk_rows
-        if not chunk_rows:
-            return
-        name = f"chunk-{chunk_index:03d}.parquet"
-        if not args.dry_run:
-            table = pa.Table.from_pylist(chunk_rows, schema=schema)
-            pq.write_table(table, out_dir / name)
-        written.append(
-            {
-                "file": name,
-                "rows": len(chunk_rows),
-                "rank_rows": len(chunk_rows) // args.world_size,
-                "steps": len(chunk_rows) // (args.world_size * args.batch_size),
-            }
-        )
-        chunk_index += 1
-        chunk_rows = []
+    if total_train == 0:
+        raise SystemExit(f"the train split is empty under {args.data}")
 
+    # Round-robin: train row i goes to chunk (i % n_chunks). Each chunk therefore
+    # gets an interleaved sample of the WHOLE corpus rather than one contiguous
+    # region, so no chunk is biased toward early or late queries. Deterministic,
+    # and every train row lands in exactly one chunk (up to the per-chunk cap).
+    n_chunks = min(args.max_chunks, max(1, total_train // args.rows_per_chunk))
+    chunk_rows = [[] for _ in range(n_chunks)]
+    accepted = 0
     for path in files:
         parquet = pq.ParquetFile(path)
         for batch in parquet.iter_batches(columns=columns, batch_size=1024):
             for row in batch.to_pylist():
-                total_seen += 1
-                # Same predicate the trainer applies, on the same key: bucketing
-                # on `anchor` keeps every row of a query in one split.
                 if not split_accepts(
-                    0,
-                    "train",
-                    args.modulo,
-                    group_key=str(row.get("anchor") or ""),
+                    0, "train", args.modulo, group_key=str(row.get("anchor") or "")
                 ):
                     continue
-                total_train += 1
-                chunk_rows.append(row)
-                if len(chunk_rows) >= args.rows_per_chunk:
-                    flush()
-                    if len(written) >= args.max_chunks:
-                        break
-            if len(written) >= args.max_chunks:
-                break
-        if len(written) >= args.max_chunks:
-            break
+                target = accepted % n_chunks
+                if len(chunk_rows[target]) < args.rows_per_chunk:
+                    chunk_rows[target].append(row)
+                accepted += 1
 
-    if len(written) < args.max_chunks:
-        flush()
+    written: list[dict[str, object]] = []
+    for idx, rows in enumerate(chunk_rows):
+        if not rows:
+            continue
+        name = f"chunk-{idx:03d}.parquet"
+        if not args.dry_run:
+            table = pa.Table.from_pylist(rows, schema=schema)
+            pq.write_table(table, out_dir / name)
+        written.append(
+            {
+                "file": name,
+                "rows": len(rows),
+                "rank_rows": len(rows) // args.world_size,
+                "steps": len(rows) // (args.world_size * args.batch_size),
+            }
+        )
 
     manifest = {
         "source": str(Path(args.data).resolve()),

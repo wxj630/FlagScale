@@ -82,6 +82,21 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 # (0 without it) and it does not affect the XCCL failure.
 unset XMLIR_BMM_DISPATCH_VALUE
 
+# XBLAS compiles kernels at first use and caches them under a per-user temp dir.
+# Its default is /tmp/xpujitc-temp, created with mode 700 by whichever user got
+# there first -- on 2026-11-19 that was a different account on a shared host, so
+# every conv/matmul died with
+#   Open file /tmp/xpujitc-temp/<pid>/xpu30/0.xpu failed Error:(Permission denied)
+# and the process then hung inside the kernel instead of raising, which reads
+# like a dead card. Pointing both variables at a directory we own fixes it; the
+# failure mode is silent enough that the variables are set unconditionally
+# rather than only when the default looks broken.
+JIT_DIR=${XBLAS_JIT_DIR:-/data2/jiangxuhui/xblas_jitc}
+export XBLAS_JITC_CACHE_PATH="$JIT_DIR/cache"
+export XPUJITC_SAVE_TEMP="$JIT_DIR/tmp"
+export TMPDIR="${TMPDIR:-$JIT_DIR/tmp}"
+mkdir -p "$XBLAS_JITC_CACHE_PATH" "$XPUJITC_SAVE_TEMP"
+
 cd "$REPO"
 
 lr_at() {  # lr_at <global_step> -> cosine value, same shape as build_lr_scheduler
