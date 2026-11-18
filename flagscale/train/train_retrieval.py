@@ -668,6 +668,8 @@ def train_epoch(
     step_state: dict[str, int] | None = None,
     lr_scheduler: Any = None,
     warmup_steps: int = 0,
+    save_steps: int = 0,
+    save_cb: Any = None,
 ) -> float:
     model.train()
     optimizer.zero_grad(set_to_none=True)
@@ -754,6 +756,18 @@ def train_epoch(
                 )
             window_loss = 0.0
             window_batches = 0
+        # Periodic snapshot. Saving only at an epoch boundary made every
+        # mid-epoch death cost the whole segment: the P800 run died silently
+        # (no traceback, exit 0) after 1,220 of 1,800 steps and 3.4 hours of
+        # training produced no checkpoint at all. The vendor XCCL crash lands at
+        # a step that varies between runs (1,220 and 2,260 observed), so no
+        # segment length is safe on its own; this bounds a loss to save_steps.
+        #
+        # Every rank must call save_cb: the FSDP2 gather is a collective.
+        if save_steps > 0 and save_cb is not None and step_state is not None:
+            global_step = int(step_state.get("optimizer_step", 0))
+            if global_step % save_steps == 0:
+                save_cb(global_step)
 
     # Apply a final partial accumulation window instead of silently dropping
     # it.  Its gradient is already scaled by grad_accum, matching the normal
@@ -1318,12 +1332,27 @@ def train(config: DictConfig) -> None:
     training_started = time.time()
     last_train_loss = None
     last_validation_loss = None
+
+    # Periodic checkpoints, opt-in via train.save_steps. Written to
+    # `checkpoint-step-<N>` so a mid-epoch death leaves a usable snapshot.
+    save_steps = int(train_cfg.get("save_steps", 0) or 0)
+
+    def _save_at_step(step: int) -> None:
+        step_dir = output_dir / f"checkpoint-step-{step}"
+        save_model(
+            model, processor, step_dir, task, final=False,
+            source_dir=model_cfg.model_path, sharded=(parallel_mode == "fsdp2"),
+        )
+        if rank_zero():
+            log(f"saved step {step} checkpoint to {step_dir}")
+
     for epoch in range(1, epochs + 1):
         train_loss = train_epoch(
             model, processor, train_loader, epoch, task, device, temperature, optimizer,
             trainable, grad_accum, clip_grad, dtype_name, log_every,
             wandb_run=wandb_run, step_state=wandb_step,
             lr_scheduler=lr_scheduler, warmup_steps=warmup_steps,
+            save_steps=save_steps, save_cb=_save_at_step,
         )
         # Re-anchor the schedule once the real epoch length is known. Without
         # this a streaming dataset would decay against a placeholder total, so

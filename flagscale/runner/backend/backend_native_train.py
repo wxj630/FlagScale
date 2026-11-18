@@ -120,11 +120,17 @@ class NativeTrainBackend(BackendBase):
 
             if background:
                 f.write(
-                    f'nohup bash -c "$cmd; sync" >> {host_output_file} 2>&1 & echo $! > {host_pid_file}\n'
+                    f'nohup bash -c "$cmd; rc=\\$?; sync; exit \\$rc" >> {host_output_file} 2>&1 & echo $! > {host_pid_file}\n'
                 )
             else:
                 f.write("set -o pipefail\n")
-                f.write(f'bash -c "$cmd; sync" 2>&1 | tee -a {host_output_file}\n')
+                # `$cmd; sync` returns sync's status, not the trainer's, so ANY
+                # training crash walked out with exit 0. The P800 segmented run
+                # died silently at step 1,220 and the wrapper still printed
+                # `exit=0`, so the segment loop believed the chunk had finished
+                # and moved on to a checkpoint that was never written. Capture
+                # the status before `sync` and re-raise it.
+                f.write(f'bash -c "$cmd; rc=\\$?; sync; exit \\$rc" 2>&1 | tee -a {host_output_file}\n')
             f.write("\n")
             f.flush()
             os.fsync(f.fileno())
