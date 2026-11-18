@@ -289,6 +289,24 @@ def autocast_context(device: torch.device, dtype_name: str, platform: Any = None
         return contextlib.nullcontext()
 
 
+def _is_weight_file(name: str) -> bool:
+    """True for any file that holds model weights or describes them on disk.
+
+    ``save_model`` copies the source checkpoint's auxiliary files (config,
+    tokenizer, ...) into the snapshot.  Weight files must NOT come along: a
+    stale ``*.index.json`` points ``from_pretrained`` at the base shards and
+    overrides the snapshot that was just written.
+
+    Covers the sharded layout (``model-00001-of-00005.safetensors``), the
+    single-file layout (``model.safetensors``), legacy ``pytorch_model.bin``,
+    and both index names.
+    """
+
+    if name in {"model.safetensors.index.json", "pytorch_model.bin.index.json"}:
+        return True
+    return name.endswith((".safetensors", ".bin", ".pt", ".pth"))
+
+
 def save_model(
     model: nn.Module,
     processor: Any,
@@ -393,13 +411,38 @@ def save_model(
         # RetrievalModel.save_pretrained does on the non-sharded path.
         if task_keys:
             torch.save(task_keys, str(output_dir / "task_heads.pt"))
+        # Copy config/tokenizer files, but NEVER weight files.
+        #
+        # The exclusion used to name only model.safetensors / pytorch_model.bin,
+        # which let the SOURCE's sharded weights and their index
+        # (model-0000X-of-00005.safetensors, model.safetensors.index.json) be
+        # copied in beside the gathered file we just wrote. `from_pretrained`
+        # prefers a shard index when one is present, so it loaded the BASE
+        # weights and ignored model.safetensors entirely. Measured on a 30-step
+        # P800 checkpoint: model.safetensors differed from base in 621,186,321 of
+        # 621,236,224 elements (max|d| 1.5e-4), while the indexed shards were
+        # bit-identical to base. Segmented training warm-starts every segment
+        # from the previous checkpoint, so this made each segment silently
+        # restart from the base model while the logs showed a warm start.
         for item in Path(source_dir).iterdir():
-            if item.is_file() and item.name not in {
-                "model.safetensors",
-                "pytorch_model.bin",
-                "training_complete.json",
-            }:
+            if (
+                item.is_file()
+                and not _is_weight_file(item.name)
+                and item.name != "training_complete.json"
+            ):
                 shutil.copy2(item, output_dir / item.name)
+        # Write an index that maps every tensor to the single file we just wrote.
+        # Without an index the loader falls back to scanning for
+        # model.safetensors, which works, but a leftover index from the source
+        # is what caused the bug above; making the index explicit means the
+        # on-disk state says which weights are current instead of relying on
+        # file-name precedence rules.
+        index = {
+            "metadata": {"total_size": sum(t.numel() * t.element_size() for t in weights.values())},
+            "weight_map": {key: "model.safetensors" for key in weights},
+        }
+        with (output_dir / "model.safetensors.index.json").open("w", encoding="utf-8") as handle:
+            json.dump(index, handle, indent=2)
         if processor is not None:
             with contextlib.suppress(Exception):
                 processor.save_pretrained(output_dir)
