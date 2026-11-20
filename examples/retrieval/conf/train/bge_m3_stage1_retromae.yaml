@@ -1,0 +1,59 @@
+# BGE-M3 stage 1 of 3: RetroMAE pretraining.
+#
+# The paper's first stage, and the only one whose data is fully public (Pile +
+# Wudao + mC4). It is an encoder-decoder reconstruction task, not retrieval: an
+# encoder compresses a masked sentence into [CLS], a randomly-initialised
+# decoder rebuilds the whole sentence from [CLS] plus a lightly masked copy.
+# That is what forces [CLS] to become an information bottleneck, and [CLS] is
+# exactly what dense retrieval later scores with.
+#
+# Deliberately NOT plain MLM. A normal masked-LM objective lets every position
+# read its own context, so [CLS] is never forced to carry the sentence. The
+# ablation in the paper (+5.6 nDCG@10) comes from the bottleneck, so substituting
+# MLM would remove the reason this stage exists.
+#
+# Run:  train.retromae=true selects the RetroMAE loop in train_retrieval.py.
+# Output: a plain HF encoder that stage 2 loads via model.model_path.
+name: bge_m3_retromae
+task: embedding
+retromae: true
+seed: 42
+batch_size: 8
+gradient_accumulation_steps: 1
+# 20,000 steps in the paper at 32xA100; one epoch over our corpus is the
+# comparable unit here, since our corpus is far smaller.
+epochs: 1
+log_every: 20
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: bge_m3
+  # AutoModelForMaskedLM is loaded from this path, so it must be a masked-LM
+  # checkpoint (XLM-R base), not an encoder-only export.
+  model_path: /flagos-retrieval-models/bge-m3/bge-m3
+  max_length: 8192
+  torch_dtype: bf16
+  # The paper's asymmetric rates. Both are 15% in the reference implementation;
+  # the asymmetry comes from what each side can see, not the mask ratio.
+  encoder_mlm_probability: 0.15
+  decoder_mlm_probability: 0.15
+
+data:
+  path: /flagos-retrieval-datasets/retromae_corpus
+  format: text
+  split_modulo: 20
+  max_samples: null
+
+optimizer:
+  name: adamw
+  lr: 7.0e-5
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+hardware:
+  device_type: cuda
+  distributed_backend: auto
+  use_flaggems: false

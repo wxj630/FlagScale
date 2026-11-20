@@ -174,24 +174,37 @@ def bge_m3_three_way_loss(
     external teacher instead, matching the reference's other branch.
     """
 
-    base = unwrap_model(model)
-    if not getattr(base, "unified_finetuning", False):
+    base_model = unwrap_model(model)
+    if not getattr(base_model, "unified_finetuning", False):
         raise RuntimeError(
             "bge_m3_three_way_loss needs model.unified_finetuning=true; the "
             "sparse and colbert heads do not exist otherwise"
         )
 
-    group_size = len(batch["positive"]) // len(batch["anchor"])
-    queries = _encode_bge_m3(base, batch["anchor"], device)
-    passages = _encode_bge_m3(
-        base,
-        [t for key in _candidate_keys(batch) for t in batch[key]],
-        device,
-    )
+    # Candidates must be interleaved BY ROW, not concatenated by column.
+    # retrieval_collate yields parallel lists, so row i owns
+    # batch["positive"][i] and batch[negative_k][i]. The label stride below
+    # assumes row i's candidates are contiguous at [i*group_size, (i+1)*group_size),
+    # which only holds for row-major order. Concatenating column-major
+    # (all positives, then all negatives) silently points every label at the
+    # wrong passage while still producing a finite loss.
+    rows = len(batch["anchor"])
+    candidate_keys = _candidate_keys(batch)
+    group_size = len(candidate_keys)
+    for key in candidate_keys:
+        if len(batch[key]) != rows:
+            raise ValueError(
+                f"bge_m3_three_way_loss expects one {key!r} per row: "
+                f"{len(batch[key])} values for {rows} anchors"
+            )
 
-    dense = base.dense_score(queries["dense"], passages["dense"])
-    sparse = base.sparse_score(queries["sparse"], passages["sparse"])
-    colbert = base.colbert_score(
+    passages_flat = [batch[key][i] for i in range(rows) for key in candidate_keys]
+    queries = _encode_bge_m3(base_model, batch["anchor"], device)
+    passages = _encode_bge_m3(base_model, passages_flat, device)
+
+    dense = base_model.dense_score(queries["dense"], passages["dense"])
+    sparse = base_model.sparse_score(queries["sparse"], passages["sparse"])
+    colbert = base_model.colbert_score(
         queries["colbert"],
         passages["colbert"],
         queries["mask"],
@@ -221,9 +234,9 @@ def bge_m3_three_way_loss(
     # Self-distillation: the ensemble becomes a frozen teacher once the student
     # has had time to separate the three views. `.detach()` is what makes it
     # self-distillation rather than a fourth training signal.
-    start = int(getattr(base, "self_distill_start_step", -1) or -1)
-    step = int(getattr(base, "global_step", 0) or 0)
-    if bool(getattr(base, "use_self_distill", False)) and start >= 0 and step > start:
+    start = int(getattr(base_model, "self_distill_start_step", -1) or -1)
+    step = int(getattr(base_model, "global_step", 0) or 0)
+    if bool(getattr(base_model, "use_self_distill", False)) and start >= 0 and step > start:
         teacher = F.softmax(ensemble.detach(), dim=-1)
         distill = (
             _soft_ce(dense, teacher)

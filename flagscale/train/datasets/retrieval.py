@@ -244,6 +244,92 @@ def _take(stream: Iterator[Any], count: int) -> Iterator[Any]:
             return
 
 
+class TextCorpusDataset(IterableDataset[dict[str, str]]):
+    """Stream plain text for BGE-M3 stage 1 (RetroMAE).
+
+    Stages 2 and 3 consume pairs and triplets, but RetroMAE only needs sentences:
+    it masks one side of a sentence and reconstructs it. It therefore has no
+    anchor/positive structure at all.
+
+    Rows are split with the same query-keyed partition as the other readers, so
+    a corpus also used for retrieval evaluation cannot leak rows across splits.
+    ``column`` names the text field, defaulting to ``text`` (the schema the
+    RetroMAE reference expects).
+    """
+
+    def __init__(
+        self,
+        path: str,
+        column: str = "text",
+        max_samples: int | None = None,
+        split: str = "train",
+        split_modulo: int = 20,
+        shuffle: bool = False,
+        shuffle_buffer: int = 0,
+        seed: int = 42,
+        min_chars: int = 8,
+    ) -> None:
+        self.path = Path(path)
+        self.column = column
+        self.max_samples = max_samples
+        self.split = split
+        self.split_modulo = split_modulo
+        self.shuffle = shuffle
+        self.shuffle_buffer = int(shuffle_buffer or 0)
+        self.seed = int(seed)
+        # Below a handful of characters there is nothing for the decoder to
+        # reconstruct, and the masked-LM loss becomes pure noise.
+        self.min_chars = int(min_chars)
+        self._epoch = 0
+
+    def _files(self) -> list[Path]:
+        if self.path.is_file():
+            return [self.path]
+        return sorted(self.path.glob("*.parquet"))
+
+    def _iter_rows(self) -> Iterator[dict[str, str]]:
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("pyarrow is required for parquet corpora") from exc
+
+        rank, world_size = _shard_context()
+        seen = 0
+        accepted = 0
+        for file_path in self._files():
+            parquet = pq.ParquetFile(file_path)
+            for batch in parquet.iter_batches(columns=[self.column], batch_size=256):
+                for row in batch.to_pylist():
+                    text = str(row.get(self.column) or "").strip()
+                    if len(text) < self.min_chars:
+                        continue
+                    row_index = seen
+                    seen += 1
+                    if not split_accepts(
+                        row_index, self.split, self.split_modulo, group_key=text
+                    ):
+                        continue
+                    if accepted % world_size != rank:
+                        accepted += 1
+                        continue
+                    accepted += 1
+                    yield {"text": text}
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = int(epoch)
+
+    def __iter__(self) -> Iterator[dict[str, str]]:
+        rank, _ = _shard_context()
+        stream = _buffered_shuffle(
+            self._iter_rows(),
+            self.shuffle_buffer if self.shuffle else 0,
+            self.seed + self._epoch * 7919 + rank,
+        )
+        if self.max_samples is not None:
+            stream = _take(stream, self.max_samples)
+        return stream
+
+
 class ParquetTripletDataset(IterableDataset[dict[str, str]]):
     """Stream triplets from one parquet file or a directory of shards.
 
@@ -800,6 +886,19 @@ def build_dataset(
     # declared format rather than probing, so a misconfiguration fails at build
     # time with the name of the setting instead of deep inside a worker.
     text_format = str(data_cfg.get("format", "triplet")).lower()
+    if text_format in {"text", "corpus"}:
+        # Stage 1 (RetroMAE) needs sentences only; see TextCorpusDataset.
+        return TextCorpusDataset(
+            path,
+            column=str(data_cfg.get("text_column", "text")),
+            max_samples=max_samples,
+            split=split,
+            split_modulo=split_modulo,
+            shuffle=shuffle,
+            shuffle_buffer=shuffle_buffer,
+            seed=seed,
+            min_chars=int(data_cfg.get("min_chars", 8) or 8),
+        )
     if text_format in {"pair", "sentence_pair"}:
         columns = data_cfg.get("pair_columns", ["sentence1", "sentence2"])
         return SentencePairDataset(

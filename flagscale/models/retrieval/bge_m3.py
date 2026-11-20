@@ -160,11 +160,15 @@ class BGEM3Model(TransformerTextEncoder):
                 dim=-1, index=input_ids, src=token_weights.squeeze(-1), reduce="amax"
             )
 
+        # Never let a special token carry lexical weight. Use getattr because
+        # tokenizers differ: XLM-R (BGE-M3) has eos_token_id but some BERT
+        # variants do not, and the reference implementation would raise there.
         unused = [
-            self.tokenizer.cls_token_id,
-            self.tokenizer.eos_token_id,
-            self.tokenizer.pad_token_id,
-            self.tokenizer.unk_token_id,
+            getattr(self.tokenizer, "cls_token_id", None),
+            getattr(self.tokenizer, "eos_token_id", None),
+            getattr(self.tokenizer, "sep_token_id", None),
+            getattr(self.tokenizer, "pad_token_id", None),
+            getattr(self.tokenizer, "unk_token_id", None),
         ]
         unused = [t for t in unused if t is not None and t >= 0]
         if unused:

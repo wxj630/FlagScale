@@ -811,6 +811,130 @@ def evaluate_epoch(
     return reduce_metrics(total_loss, count, device)
 
 
+def _train_retromae(
+    *,
+    train_cfg: DictConfig,
+    model_cfg: DictConfig,
+    data_cfg: DictConfig,
+    optim_cfg: DictConfig,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+) -> None:
+    """Stage 1 of BGE-M3: RetroMAE encoder-decoder pretraining.
+
+    Separate from the retrieval loop because the data contract differs in kind,
+    not degree: six tensors per batch (encoder input/mask/labels and decoder
+    input/3-D mask/labels) instead of one collated text batch, and the loss is
+    encoder MLM plus decoder reconstruction rather than a contrastive score.
+
+    Unlike the retrieval stages there is no "split" to evaluate: RetroMAE is
+    pretraining, so validation is the reconstruction loss on held-out text.
+    We still honour the same streaming reader, so a corpus that is already
+    wired into the split logic works unchanged.
+    """
+
+    from flagscale.models.retrieval.retromae import RetroMAEForPretraining
+    from flagscale.train.datasets.retrieval import build_dataset, make_loader
+    from flagscale.train.datasets.retromae_collator import RetroMAECollator
+
+    output_dir = Path(str(train_cfg.output_dir))
+    if rank_zero():
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    lm = RetroMAEForPretraining.from_pretrained(str(model_cfg.model_path))
+    tokenizer = getattr(lm, "tokenizer", None)
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_cfg.model_path), local_files_only=True
+    )
+    lm.tokenizer = tokenizer
+    model = lm.to(device)
+
+    collator = RetroMAECollator(
+        tokenizer=tokenizer,
+        max_seq_length=int(model_cfg.get("max_length", 512)),
+        encoder_mlm_probability=float(model_cfg.get("encoder_mlm_probability", 0.15)),
+        decoder_mlm_probability=float(model_cfg.get("decoder_mlm_probability", 0.15)),
+    )
+
+    train_ds = build_dataset(
+        "embedding", data_cfg, str(data_cfg.path), "train", data_cfg.get("max_samples")
+    )
+    train_loader = make_loader(
+        train_ds,
+        int(train_cfg.get("batch_size", 8)),
+        pin_memory=False,
+        num_workers=int(data_cfg.get("num_workers", 0) or 0),
+        seed=int(train_cfg.get("seed", 42)),
+    )
+
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = build_optimizer(optim_cfg, params, allow_adafactor=False)
+    epochs = int(train_cfg.get("epochs", 1))
+    lr_scheduler, warmup_steps, lr_sched_state = build_lr_scheduler(
+        optim_cfg, optimizer, total_steps=optim_cfg.get("lr_decay_steps") or None
+    )
+    log_every = int(train_cfg.get("log_every", 10))
+    grad_clip = float(optim_cfg.get("max_grad_norm", 1.0))
+    dtype_name = str(model_cfg.get("torch_dtype", "bf16")).lower()
+    step_state = {"optimizer_step": 0}
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        set_epoch = getattr(train_ds, "set_epoch", None)
+        if callable(set_epoch):
+            set_epoch(epoch)
+        running = 0.0
+        batches = 0
+        for step, rows in enumerate(train_loader, start=1):
+            # The retrieval reader yields dicts; RetroMAE wants raw strings.
+            texts = [str(row.get("anchor") or row.get("text") or "") for row in rows]
+            texts = [t for t in texts if t.strip()]
+            if not texts:
+                continue
+            batch = {
+                key: value.to(device) for key, value in collator(texts).items()
+            }
+            with autocast_context(device, dtype_name):
+                (loss,) = model(**batch)
+            if not torch.isfinite(loss):
+                raise FloatingPointError(
+                    f"non-finite RetroMAE loss at epoch {epoch} step {step}: {loss.item()}"
+                )
+            loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(params, grad_clip)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            lr_scheduler.step()
+            step_state["optimizer_step"] += 1
+            running += float(loss.detach())
+            batches += 1
+
+            if log_every and step % log_every == 0 and rank_zero():
+                log(
+                    f"epoch={epoch} step={step} "
+                    f"loss={running / max(batches, 1):.6f} "
+                    f"lr={float(optimizer.param_groups[0].get('lr', 0.0)):.3e}"
+                )
+        if batches == 0:
+            raise RuntimeError("RetroMAE training dataset produced no usable text")
+
+        if rank_zero():
+            epoch_loss = running / batches
+            log(f"epoch={epoch}/{epochs} retromae_loss={epoch_loss:.6f}")
+            ckpt_dir = output_dir / f"checkpoint-epoch-{epoch}"
+            # save_pretrained writes a plain HF encoder so stage 2 can load it.
+            model.save_pretrained(str(ckpt_dir))
+            log(f"saved stage-1 encoder to {ckpt_dir}")
+
+    if rank_zero():
+        model.save_pretrained(str(output_dir))
+        log("stage 1 complete")
+
+
 def _train_megatron(
     *,
     train_cfg: DictConfig,
@@ -1204,6 +1328,20 @@ def train(config: DictConfig) -> None:
             seed=seed,
             seed_record=seed_record,
             platform=platform,
+        )
+    # RetroMAE (BGE-M3 stage 1) is an encoder-decoder with a reconstruction
+    # objective; it owns its own loop rather than dropping into the contrastive
+    # one below. Selected by an explicit config flag so no existing run changes
+    # behaviour.
+    if _as_bool(train_cfg.get("retromae", False)):
+        return _train_retromae(
+            train_cfg=train_cfg,
+            model_cfg=model_cfg,
+            data_cfg=data_cfg,
+            optim_cfg=optim_cfg,
+            device=device,
+            rank=rank,
+            world_size=world_size,
         )
     master_dtype_name = str(train_cfg.get("master_dtype", "bf16")).lower()
     master_dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}.get(

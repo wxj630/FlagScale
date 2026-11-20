@@ -1,0 +1,65 @@
+# BGE-M3 stage 3 of 3: unified fine-tuning with self-knowledge distillation.
+#
+# The paper's final stage. Three retrieval functions are trained jointly --
+# dense ([CLS]), sparse (lexical weights per token) and multi-vector (ColBERT
+# style per-token projections) -- and the three scores are fused into an
+# ensemble that supervises the individual heads.
+#
+# `unified_finetuning: true` is what turns this on. It creates sparse_linear and
+# colbert_linear from scratch (the paper's W_lex / W_mul), and it switches the
+# loss to `bge_m3_three_way_loss`: per-head InfoNCE + an ensemble term
+# (dense + 0.3*sparse + colbert) + a detached-ensemble teacher after
+# `self_distill_start_step`.
+#
+# The 0.3 and 0.1 fusion weights are constants in code, not settings, because
+# paper Table 8 uses exactly those and any deviation makes the numbers
+# incomparable with the paper and with A100/PPU.
+#
+# Data here is the SUPERVISED set with hard negatives -- T2Ranking triplets, one
+# of the 17 datasets the paper names. Unlike stage 2, negatives are explicit.
+name: bge_m3_stage3_unified
+task: embedding
+seed: 42
+batch_size: 16
+gradient_accumulation_steps: 1
+epochs: 1
+log_every: 20
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: bge_m3
+  # Stage 2's output, or BAAI/bge-m3-unsupervised to use the published weights.
+  model_path: /flagos-retrieval-models/bge-m3-unsupervised/bge-m3-unsupervised
+  max_length: 8192
+  torch_dtype: bf16
+  freeze_backbone: false
+  unified_finetuning: true
+  # -1 keeps colbert at hidden_size, matching the released bge-m3 checkpoint.
+  colbert_dim: -1
+  # Whether to enable the distillation term, and from which step. -1 disables
+  # it, which is the reference default; a real run wants a few hundred steps of
+  # plain three-way training first so the ensemble teacher is not noise.
+  use_self_distill: true
+  self_distill_start_step: 500
+
+data:
+  path: /flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15
+  format: triplet
+  split_modulo: 20
+  shuffle_buffer: 20000
+  num_negatives: 1
+  max_samples: null
+
+optimizer:
+  name: adamw
+  lr: 1.0e-5
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+hardware:
+  device_type: cuda
+  distributed_backend: auto
+  use_flaggems: false

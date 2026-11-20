@@ -1,0 +1,60 @@
+# BGE-M3 stage 2 of 3: contrastive pretraining (dense only).
+#
+# The paper's second stage. Only the dense head is trained -- sparse and
+# multi-vector are introduced in stage 3 -- which is why the model is built with
+# `unified_finetuning: false`: the two extra heads are not even created, so this
+# checkpoint cannot carry randomly-initialised head weights into stage 3.
+#
+# Data shape matters here. The paper draws (text_a, text_b) pairs from document
+# structure (title<->body, title<->abstract, instruction<->output, sentence<->
+# translation) and relies on **in-batch negatives only** -- there are no explicit
+# negatives. That is why `format: pair` is used with no negative columns;
+# `embedding_loss` treats every other row's positive as a negative.
+#
+# Do NOT feed this stage triplets with mined negatives: the paper's stage 2 is
+# unsupervised, and hard negatives belong to stage 3's supervised recipe.
+name: bge_m3_stage2_contrastive
+task: embedding
+seed: 42
+batch_size: 32
+gradient_accumulation_steps: 1
+epochs: 1
+log_every: 20
+temperature: 0.05
+output_dir: ${oc.env:FLAGSCALE_OUTPUT_DIR,/flagos-retrieval-ckpts/${train.name}}
+
+model:
+  model_type: bge_m3
+  # Stage 1's encoder output. Point this at bge_m3_stage1_retromae's result to
+  # chain the stages, or at BAAI/bge-m3-retromae to start from the published
+  # stage-1 weights.
+  model_path: /flagos-retrieval-models/bge-m3-retromae/bge-m3-retromae
+  max_length: 8192
+  torch_dtype: bf16
+  freeze_backbone: false
+  unified_finetuning: false
+
+data:
+  path: /flagos-retrieval-datasets/bge_contrastive_pairs
+  format: pair
+  pair_columns: [text_a, text_b]
+  # No score column: every row is a positive pair.
+  split_modulo: 20
+  shuffle_buffer: 20000
+  max_samples: null
+
+optimizer:
+  name: adamw
+  lr: 5.0e-5
+  lr_decay_style: cosine
+  min_lr: 1.0e-6
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  # Paper stage 2: warmup 0.1, query 512 / passage 8192, 25,000 steps.
+  # Our corpus is smaller, so steps are bounded by epochs instead.
+
+hardware:
+  device_type: cuda
+  distributed_backend: auto
+  use_flaggems: false
