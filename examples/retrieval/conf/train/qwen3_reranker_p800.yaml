@@ -1,0 +1,25 @@
+# Qwen3-Reranker-8B on Kunlunxin P800 — acceptance fine-tune, FSDP2, 2 cards.
+#
+# Identical to qwen3_reranker.yaml except `batch_size`, which is 16 instead of
+# 32. Everything else (lr, epochs, max_length, splits, data paths) is inherited
+# unchanged, so a P800 result stays comparable to A100/PPU on every axis but the
+# per-step row count.
+#
+# Why 16 (measured 2026-11-20): FSDP2's all-gather of lm_head asks for a single
+# 11.57 GiB CONTIGUOUS block. The vendor allocator does not support
+# expandable_segments, so batch 32 died with
+#   Tried to allocate 11.57 GiB. 96.00 GiB total, 20.90 GiB free,
+#   71.68 GiB already allocated by PyTorch
+# -- 20.9 GiB free but not as one block. That is fragmentation, not capacity, so
+# a larger card would not help.
+#
+# Effective batch: 16 x 2 ranks x GA 1 = 32 rows/step, HALF of A100's 64. Any
+# throughput comparison against A100 must therefore use pairs/s, not s/step or
+# end-to-end hours (AGENTS.md s.9). Kept GA at 1: accum=2 was measured to need
+# another 2.31 GiB and OOM'd with 17.34 GiB free, same fragmentation cause.
+
+defaults:
+  - qwen3_reranker
+
+name: qwen3_reranker_p800
+batch_size: 16
