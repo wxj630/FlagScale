@@ -7,6 +7,14 @@ seed: 42
 # second-moment state, built into torch).  Measured peak is ~50GB at batch 32.
 # max_length 640 covers the full T2Ranking triplet distribution (p99 471,
 # max 541 tokens) instead of padding to 2048.
+#
+# batch_size stays 32 as the shared value.  P800 cannot run it: FSDP2's
+# all-gather of lm_head asks for a single 11.57 GiB contiguous block and the
+# vendor allocator has no expandable_segments, so 32 OOMs while ~22 GiB is free
+# (fragmentation, not capacity). That is a platform property, registered in
+# AGENTS.md section 8, so the P800 launch script sets batch 16 (GA 1) there
+# rather than every operator retyping it -- and 16 x 2 ranks = 32 rows/step,
+# half of A100's 64, which must be flagged when comparing throughput.
 batch_size: 32
 gradient_accumulation_steps: 1
 epochs: 3
