@@ -8,7 +8,7 @@
 # conf/train/<model>.yaml so every platform runs the same experiment
 # (AGENTS.md section 8).
 set -uo pipefail
-source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 # Resolve the repo root from this script's location (examples/retrieval/),
 # so the same file works on every host; FLAGSCALE_HOME still overrides.
 ROOT=${FLAGSCALE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
@@ -33,20 +33,20 @@ _assert_cards() {
 _assert_cards || exit 1
 
 
-VN=${FLAGSCALE_PYTHON_ENV:-/data2/jiangxuhui/envs/retrieval-vendor}
+VN=${FLAGSCALE_PYTHON_ENV:-$FLAGOS_ENVS/retrieval-vendor}
 PY="$VN/bin/python"
 
 # Megatron-LM-FL is not installed as a package on these hosts; it is a git clone
 # that the trainer imports as `megatron.core`.  Point PYTHONPATH at it only for
 # the megatron backend so the ddp/fsdp2 runs keep their original import set.
-MEGATRON_HOME=${FLAGSCALE_MEGATRON_HOME:-/data2/jiangxuhui/megatron-reranker/Megatron-LM-FL}
+MEGATRON_HOME=${FLAGSCALE_MEGATRON_HOME:-$FLAGOS_MEGATRON/Megatron-LM-FL}
 
 # Outputs and scratch on the data disk: the host / is 100% full and anything
 # written under it fails with ENOSPC mid-run.
-OUT=/data2/jiangxuhui/flagos-retrieval-ckpts/${model}
+OUT=$FLAGOS_CKPTS/${model}
 LOGS=$OUT/logs
-export TMPDIR=/data2/jiangxuhui/tmp
-export TORCH_EXTENSIONS_DIR=/data2/jiangxuhui/cache/torch_extensions
+export TMPDIR=$FLAGOS_SCRATCH/tmp
+export TORCH_EXTENSIONS_DIR=$FLAGOS_SCRATCH/torch_extensions
 mkdir -p "$OUT" "$LOGS" "$TMPDIR" "$TORCH_EXTENSIONS_DIR"
 
 export FLAGOS_USE_FLAGGEMS=false

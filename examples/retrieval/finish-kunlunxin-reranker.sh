@@ -10,15 +10,15 @@
 # so `evaluate_models.sh` finds `<RUN_ROOT>/qwen3_reranker`.
 set -uo pipefail
 ROOT=${FLAGSCALE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
-MG=/data2/jiangxuhui/megatron-reranker
-RUN_ROOT="${RUN_ROOT:-/data2/jiangxuhui/megatron-reranker/runs/reranker8b-pp2-split}"
+MG=$FLAGOS_MEGATRON
+RUN_ROOT="${RUN_ROOT:-$FLAGOS_MEGATRON/runs/reranker8b-pp2-split}"
 STAGES="${STAGES:-$RUN_ROOT/checkpoint}"
-HF_OUT="${HF_OUT:-/data2/jiangxuhui/flagos-retrieval-ckpts/kunlunxin-reranker-3epoch/qwen3_reranker}"
+HF_OUT="${HF_OUT:-$FLAGOS_CKPTS/kunlunxin-reranker-3epoch/qwen3_reranker}"
 PP="${PP:-2}"
 MODEL=/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
 
 cd "$ROOT" || exit 1
-source /data2/jiangxuhui/flagos-retrieval-vendor-env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 export PYTHONPATH="$MG:$MG/Megatron-LM-FL:$ROOT"
 export XMLIR_BMM_DISPATCH_VALUE=0
 export TE_FL_SKIP_CUDA=1
@@ -32,7 +32,7 @@ python -m mrr.export_hf --stages "$STAGES" --pp "$PP" --model "$MODEL" --out "$H
 # The evaluator expects the model directory directly under RUN_ROOT, and it
 # derives `base` from the config's model_path, so only the trained copy needs
 # placing.  A symlink keeps the export and the eval path in one place.
-EVAL_ROOT=/data2/jiangxuhui/flagos-retrieval-ckpts/kunlunxin-reranker-3epoch
+EVAL_ROOT=$FLAGOS_CKPTS/kunlunxin-reranker-3epoch
 mkdir -p "$EVAL_ROOT"
 rm -rf "$EVAL_ROOT/qwen3_reranker"
 ln -s "$HF_OUT" "$EVAL_ROOT/qwen3_reranker"
@@ -40,7 +40,7 @@ ln -s "$HF_OUT" "$EVAL_ROOT/qwen3_reranker"
 echo "===== evaluate $(date '+%F %T') ====="
 export RUN_ROOT="$EVAL_ROOT"
 export EVAL_DEVICE=cuda
-export PYTHON="${PYTHON:-/data2/jiangxuhui/envs/retrieval-vendor/bin/python}"
+export PYTHON="${PYTHON:-$FLAGOS_ENVS/retrieval-vendor/bin/python}"
 export MODELS=qwen3_reranker
 export TAGS="base trained"
 # 16 candidates per query (1 positive + 15 shared negatives), which is what the

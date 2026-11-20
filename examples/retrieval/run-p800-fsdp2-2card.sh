@@ -10,6 +10,7 @@
 #   FLAGSCALE_PYTHON_ENV=/path/to/venv CARDS=2,3 bash run-p800-fsdp2-2card.sh
 #   ... bash run-p800-fsdp2-2card.sh train.data.max_samples=64   # smoke
 set -eo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 
 REPO=${FLAGSCALE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 : "${FLAGSCALE_PYTHON_ENV:?set FLAGSCALE_PYTHON_ENV to the vendor python root}"
@@ -18,7 +19,7 @@ export PATH="$FLAGSCALE_PYTHON_ENV/bin:$PATH"
 
 MODEL=${MODEL_PATH:-/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B}
 DATA=${DATA_PATH:-/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15}
-OUT=${OUT:-/data2/jiangxuhui/flagos-retrieval-ckpts/p800-fsdp2-2card}
+OUT=${OUT:-$FLAGOS_CKPTS/p800-fsdp2-2card}
 CARDS=${CARDS:-3,7}
 
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"

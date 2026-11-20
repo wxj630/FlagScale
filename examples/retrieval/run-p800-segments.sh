@@ -39,8 +39,9 @@
 #   CHUNK=3 bash run-p800-segments.sh         # just one
 #   DRY_RUN=1 bash run-p800-segments.sh       # print the plan, train nothing
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 
-REPO=${FLAGSCALE_HOME:-/data2/jiangxuhui/FlagScale}
+REPO=${FLAGSCALE_HOME:-$FLAGOS_CODE_ROOT/FlagScale}
 : "${FLAGSCALE_PYTHON_ENV:?set FLAGSCALE_PYTHON_ENV}"
 PY="$FLAGSCALE_PYTHON_ENV/bin/python"
 export PATH="$FLAGSCALE_PYTHON_ENV/bin:$PATH"
@@ -51,7 +52,7 @@ MODEL=${MODEL_PATH:-/flagos-retrieval-models/Qwen3-Reranker-8B/Qwen3-Reranker-8B
 # evaluation set, or the reported nDCG stops being comparable to A100/PPU.
 EVAL_DATA=${EVAL_DATA:-/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15}
 CHUNK_DIR=${CHUNK_DIR:-/flagos-retrieval-datasets/t2ranking/t2ranking/triplet-15-chunks}
-ROOT_OUT=${OUT:-/data2/jiangxuhui/flagos-retrieval-ckpts/p800-chunks}
+ROOT_OUT=${OUT:-$FLAGOS_CKPTS/p800-chunks}
 
 BATCH=${BATCH_SIZE:-16}
 STEPS_PER_CHUNK=${STEPS_PER_CHUNK:-900}
@@ -91,7 +92,7 @@ unset XMLIR_BMM_DISPATCH_VALUE
 # like a dead card. Pointing both variables at a directory we own fixes it; the
 # failure mode is silent enough that the variables are set unconditionally
 # rather than only when the default looks broken.
-JIT_DIR=${XBLAS_JIT_DIR:-/data2/jiangxuhui/xblas_jitc}
+JIT_DIR=${XBLAS_JIT_DIR:-$FLAGOS_SCRATCH/xblas_jitc}
 export XBLAS_JITC_CACHE_PATH="$JIT_DIR/cache"
 export XPUJITC_SAVE_TEMP="$JIT_DIR/tmp"
 export TMPDIR="${TMPDIR:-$JIT_DIR/tmp}"

@@ -6,6 +6,7 @@
 # already the best.  Spending another two days past that point buys nothing.
 # This script only observes; the decision to stop is a human one.
 set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/paths.sh"
 ENVF=/Volumes/PSSD/code/FlagOS/FlagScale/.env
 PW=$(sed -n 's/^PPU_PASSWORD=//p' "$ENVF" | tail -1)
 
@@ -19,7 +20,7 @@ a100() {
 
 kunlunxin() {
   ssh -o ConnectTimeout=20 -o BatchMode=yes kunlunxin '
-    L=/data2/jiangxuhui/s640full.log
+    L=$FLAGOS_SCRATCH/s640full.log
     S=$(tail -1 "$L" | grep -aoE "step=[0-9]+" | head -1)
     R=$(tail -1 "$L" | grep -aoE "pairs/s=[0-9.]+" | head -1)
     END=$(grep -a "train_loss=" "$L" | tail -1)
