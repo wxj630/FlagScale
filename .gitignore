@@ -34,3 +34,9 @@ CLAUDE.md
 .env
 .env.*
 !.env.example
+
+# Upstream clones used for reference only (BGE-M3's three training stages).
+# They are separate git repositories, so vendoring them would duplicate history
+# and drift; clone on demand instead:
+#   git clone --depth 1 https://github.com/FlagOpen/FlagEmbedding.git
+FlagEmbedding/
